@@ -109,7 +109,83 @@ Once your image is built, you can use them as in the example pipeline above.
           - reports/*
 ```
 
-### Windows image is still under construction and does not work. 
+### Windows image
+
+```yaml
+# Bitbucket pipeline for .NET project running on a Windows self-hosted runner
+# Includes ASoC SAST scanning via Docker (Windows container mode)
+
+pipelines:
+  default:
+    - step:
+        name: Build and Test (.NET on Windows)
+        runs-on:
+          - self.hosted
+          - windows     # make sure your runner has this tag
+        script:
+          # Restore .NET dependencies
+          - dotnet restore
+
+          # Build project
+          - dotnet build --configuration Release
+
+          # Run tests (if applicable)
+          - dotnet test --no-build --verbosity normal --logger:"trx;LogFileName=TestResults.trx"
+
+        artifacts:
+          - bin/**
+          - obj/**
+          - TestResults/**
+        after-script:
+          - echo "✅ Build and tests completed successfully."
+
+    - step:
+        name: ASoC SAST Scan (Windows)
+        runs-on:
+          - self.hosted
+          - windows
+        script:
+          # Tell Docker CLI to use the Windows named pipe
+          - $env:DOCKER_HOST = "npipe:////./pipe/docker_engine"
+
+          # Confirm Docker connectivity
+          - docker version
+
+          # Get absolute path to the repo directory
+          - $localPath = (Resolve-Path "$env:BITBUCKET_CLONE_DIR").Path
+          - Write-Host "Resolved localPath = $localPath"
+
+          # Verify that the path actually exists
+          - |
+            if (-not (Test-Path $localPath)) {
+              Write-Host "Path not found: $localPath"
+              exit 1
+            } else {
+              Write-Host "Path exists: $localPath"
+            }
+
+          # Run the Windows-based ASoC SAST scan container
+          - docker run --rm `
+              -e API_KEY_ID=$env:API_KEY_ID `
+              -e API_KEY_SECRET=$env:API_KEY_SECRET `
+              -e APP_ID=$env:APP_ID `
+              -e TARGET_DIR="C:\src\bin" `
+              -e DATACENTER="NA" `
+              -e SECRET_SCANNING="true" `
+              -e CONFIG_FILE_PATH="C:\src\appscan-config.xml" `
+              -e REPO=$env:BITBUCKET_REPO_FULL_NAME `
+              -e BUILD_NUM=$env:BITBUCKET_BUILD_NUMBER `
+              -e SCAN_NAME="ASoC_SAST_BitBucket" `
+              -e DEBUG="true" `
+              -e STATIC_ANALYSIS_ONLY="false" `
+              -e OPEN_SOURCE_ONLY="false" `
+              -v "${localPath}:C:\src" `
+              vndpal/bitbucket_asoc_sast:windows17
+
+        artifacts:
+          - reports/*
+
+```
 
 If you have any questions raise an issue in this repo.
 
