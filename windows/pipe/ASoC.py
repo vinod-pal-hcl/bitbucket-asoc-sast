@@ -88,9 +88,10 @@ class ASoC:
             
     def uploadFile(self, filePath):
         #files = {'name': (<filename>, <file object>, <content type>, <per-part headers>)}
+        fileName = os.path.basename(filePath)
         files = {
-            "uploadedFile": ("test.irx", open(filePath, 'rb'), 'application/octet-stream'),
-            "fileName": (None, "test.irx")
+            "uploadedFile": (fileName, open(filePath, 'rb'), 'application/octet-stream'),
+            "fileName": (None, fileName)
         }
         headers = {
             "Accept": "application/json",
@@ -115,14 +116,13 @@ class ASoC:
             "Authorization": "Bearer "+self.token
         }
         resp = requests.post(f"{self.base_url}/api/v4/Scans/Sast/", headers=headers, json=data)
-        if(resp.status_code != 201):
-            print(f"Error submitting scan")
-            print(resp.json())
         if(resp.status_code == 201):
             scanId = resp.json()["Id"]
             return scanId
-            
-        return None
+        else:
+            print(f"Error submitting scan")
+            print(resp.json())
+            return None
 
     def createScaScan(self, scanName, appId, irxFileId, comment=""):
         data = {
@@ -137,14 +137,13 @@ class ASoC:
             "Authorization": "Bearer "+self.token
         }
         resp = requests.post(f"{self.base_url}/api/v4/Scans/Sca/", headers=headers, json=data)
-        if(resp.status_code != 201):
-            print(f"Error submitting scan")
-            print(resp.json())
         if(resp.status_code == 201):
             scanId = resp.json()["Id"]
             return scanId
-            
-        return None
+        else:
+            print(f"Error submitting scan")
+            print(resp.json())
+            return None
     
     def getScanStatus(self, scanId):
         headers = {

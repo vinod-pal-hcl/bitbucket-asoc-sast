@@ -187,5 +187,48 @@ pipelines:
 
 ```
 
+### Customization and Custom Implementation
+
+This repository is fully customizable. You can modify the files to create your own custom implementation according to your specific needs.
+
+#### Getting Started with Customization
+
+1. **Fork or Clone the Repository**
+   ```shell
+   git clone https://github.com/cwtravis/bitbucket-asoc-sast.git
+   cd bitbucket-asoc-sast
+   ```
+
+2. **Modify Python Scripts**
+   - Edit `linux/pipe/ASoC.py` or `windows/pipe/ASoC.py` to customize API interactions, error handling, or add new features
+   - Edit `linux/pipe/RunSAST.py` or `windows/pipe/RunSAST.py` to modify scan execution logic, reporting, or workflow
+
+3. **Update Docker Configuration**
+   - Modify `linux/Dockerfile` or `windows/Dockerfile` to change base images or configure the environment
+   - Update `requirements.txt` if you add new Python packages
+
+4. **Customize Pipeline Variables**
+   - Edit `linux/pipe.yml` or `windows/pipe.yml` to add new variables or change pipe metadata
+   - Adapt the docker run commands and environment variables in your `bitbucket-pipelines.yml` to fit your project's requirements
+
+5. **Build and Push Your Custom Image**
+   ```shell
+   # For Linux
+   cd linux
+   docker build -t <YOUR_DOCKERHUB>/bitbucket_asoc_sast:custom .
+   docker push <YOUR_DOCKERHUB>/bitbucket_asoc_sast:custom
+   
+   # For Windows
+   cd windows
+   docker build -t <YOUR_DOCKERHUB>/bitbucket_asoc_sast:windows-custom .
+   docker push <YOUR_DOCKERHUB>/bitbucket_asoc_sast:windows-custom
+   ```
+
+6. **Use Your Custom Image in Pipeline**
+   Update your `bitbucket-pipelines.yml` to reference your custom image:
+   ```yaml
+   - pipe: docker://<YOUR_DOCKERHUB>/bitbucket_asoc_sast:custom
+   ```
+
 If you have any questions raise an issue in this repo.
 
