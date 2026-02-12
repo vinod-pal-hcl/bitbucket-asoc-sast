@@ -199,7 +199,7 @@ class AppScanOnCloudSAST(Pipe):
     #download and unzip SAClientUtil to {cwd}/saclient
     def getSAClient(self, saclientPath="saclient"):
         #Downloading SAClientUtil
-        url = self.asoc.getDataCenterURL() + "/api/v4/Tools/SAClientUtil?os=win"
+        url = self.asoc.getDataCenterURL() + "/api/v4/Tools/SAClientUtilByType?toolType=win"
         logger.info("Downloading SAClientUtil Zip")
         try:
             r = requests.get(url, stream=True)
