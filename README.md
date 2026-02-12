@@ -3,7 +3,7 @@ This repo contains windows/linux docker image that uses python to download the S
 
 ### Variables
 
-The pipe has 13 variables.
+The pipe has 19 variables.
 
 | Variable |  Required | Description |
 |---|---|---|
@@ -15,13 +15,39 @@ The pipe has 13 variables.
 | SECRET_SCANNING | Optional | True or False. Enables or disables the secret scanning feature. |
 | REPO | Optional | The Repository name. Only really used to make filenames and comments relevant. |
 | BUILD_NUM | Optional | The Bitbucket build number. Used to make filenames and comments relevant. |
-| SCAN_NAME | Optional | The name of the scan in AppScan on Cloud |
+| SCAN_NAME | Optional | The name of the scan in AppScan on Cloud. Default: "HCL_ASoC_SAST" |
 | DATACENTER | Optional | ASoC Datacenter to connect to: "NA" (default) or "EU", or an AppScan 360 url |
-| DEBUG | Optional | If true, prints additional debug info to the log. |
-| STATIC_ANALYSIS_ONLY | Optional | If true, only prepare for static analysis during IRX generation. |
-| OPEN_SOURCE_ONLY | Optional | If true, only gather opensource information during IRX generation. |
+| DEBUG | Optional | If true, prints additional debug info to the log. Default: false |
+| STATIC_ANALYSIS_ONLY | Optional | If true, only prepare for static analysis during IRX generation. Default: false |
+| OPEN_SOURCE_ONLY | Optional | If true, only gather opensource information during IRX generation. Default: false |
+| ALLOW_UNTRUSTED | Optional | If true, disables SSL certificate verification for HTTPS requests. Default: false (SSL verification enabled) |
+| SCAN_SPEED | Optional | Scan depth/speed: "simple" (quick checks), "balanced" (CI/CD), "deep" (default, thorough analysis), "thorough" (most comprehensive). Default: None (uses AppScan default) |
+| PERSONAL_SCAN | Optional | If true, creates a personal scan in AppScan on Cloud. Default: false |
+| WAIT_FOR_ANALYSIS | Optional | If true, waits for the scan to complete before finishing. Default: true |
+| FAIL_FOR_NONCOMPLIANCE | Optional | If WAIT_FOR_ANALYSIS is true, fail the job if any non-compliant issues are found at or above the FAILURE_THRESHOLD severity. Default: false |
+| FAILURE_THRESHOLD | Optional | If FAIL_FOR_NONCOMPLIANCE is enabled, the severity that indicates a failure. Lesser severities will not cause a failure. Valid values: "Critical", "High", "Medium", "Low", "Informational". Default: "Low" |
 
-**Note about specifying a config file. Providing a config file can override other settings like `TARGET_DIR` or `SECRET_SCANNING`
+**Note:** Providing a config file can override other settings like `TARGET_DIR` or `SECRET_SCANNING`.
+
+**Security Note:** Only set `ALLOW_UNTRUSTED` to true in development/testing environments with self-signed certificates. In production, keep SSL verification enabled (default).
+
+### Fail Build on Security Issues
+
+You can configure the pipeline to fail automatically when security issues are found at or above a certain severity threshold. This is useful for enforcing security policies in your CI/CD pipeline.
+
+**How it works:**
+- Set `FAIL_FOR_NONCOMPLIANCE` to `"true"` to enable the fail build feature
+- Set `FAILURE_THRESHOLD` to the minimum severity that should cause a failure
+- The pipeline will fail if any issues are found at or above the threshold
+
+**Threshold Examples:**
+| FAILURE_THRESHOLD | Fails on |
+|---|---|
+| Critical | Critical issues only |
+| High | Critical + High issues |
+| Medium | Critical + High + Medium issues |
+| Low | Critical + High + Medium + Low issues (default) |
+| Informational | Any issues |
 
 ### Example bitbucket-pipelines.yml step
 
@@ -66,8 +92,117 @@ pipelines:
               DEBUG: "true"
               STATIC_ANALYSIS_ONLY: "false"
               OPEN_SOURCE_ONLY: "false"
+              SCAN_SPEED: "balanced"
+              PERSONAL_SCAN: "false"
+              # Fail Build Variables
+              WAIT_FOR_ANALYSIS: "true"
+              FAIL_FOR_NONCOMPLIANCE: "true"
+              FAILURE_THRESHOLD: "High"
         artifacts:
           - reports/*
+```
+
+### Using Scan Results in Subsequent Pipeline Steps
+
+The pipe now exports scan results that can be used in subsequent pipeline steps. After the scan completes, the following files are generated in the `reports/` directory:
+
+**Output Files:**
+- `scan_results.txt` - Key-value pairs of scan metrics
+- `scan_env.sh` - Sourceable shell script with environment variables
+- `report_paths.txt` - Paths to generated reports
+- `{scanName}.html` - Full HTML security report
+- `{scanName}.json` - Complete JSON scan summary
+
+**Exported Variables:**
+- `ASOC_SCAN_ID` - The scan ID in AppScan on Cloud
+- `ASOC_SCAN_NAME` - Name of the scan
+- `ASOC_TOTAL_ISSUES` - Total number of issues found
+- `ASOC_CRITICAL_ISSUES` - Number of critical severity issues
+- `ASOC_HIGH_ISSUES` - Number of high severity issues
+- `ASOC_MEDIUM_ISSUES` - Number of medium severity issues
+- `ASOC_LOW_ISSUES` - Number of low severity issues
+- `ASOC_INFO_ISSUES` - Number of informational issues
+- `ASOC_SCAN_DURATION_SECONDS` - Scan duration in seconds
+- `ASOC_SCAN_URL` - Direct URL to view scan results in AppScan on Cloud
+
+#### Example: Using Outputs in Next Steps
+
+```yaml
+pipelines:
+  default:
+    - step:
+        name: Build and Test
+        script:
+          - gradle build
+        artifacts:
+          - build/libs/*.war
+          
+    - step:
+        name: ASoC SAST Scan
+        script:
+          - pipe: docker://cwtravis1/bitbucket_asoc_sast:linux
+            variables:
+              API_KEY_ID: $API_KEY_ID
+              API_KEY_SECRET: $API_KEY_SECRET
+              APP_ID: $APP_ID
+              TARGET_DIR: $BITBUCKET_CLONE_DIR/build/libs
+        artifacts:
+          - reports/*
+          
+    - step:
+        name: Evaluate Security Results
+        script:
+          # Source the environment variables from the scan
+          - source reports/scan_env.sh
+          
+          # Display scan results
+          - echo "Scan ID: $ASOC_SCAN_ID"
+          - echo "Total Issues: $ASOC_TOTAL_ISSUES"
+          - echo "Critical Issues: $ASOC_CRITICAL_ISSUES"
+          - echo "High Issues: $ASOC_HIGH_ISSUES"
+          - echo "View Report: $ASOC_SCAN_URL"
+          
+          # Fail the pipeline if critical or high issues found
+          - |
+            if [ "$ASOC_CRITICAL_ISSUES" -gt 0 ]; then
+              echo "❌ Build failed: $ASOC_CRITICAL_ISSUES critical security issues found!"
+              exit 1
+            fi
+          - |
+            if [ "$ASOC_HIGH_ISSUES" -gt 5 ]; then
+              echo "❌ Build failed: Too many high severity issues ($ASOC_HIGH_ISSUES > 5)!"
+              exit 1
+            fi
+          
+          # Upload report to external system (example)
+          - curl -F "report=@reports/*.html" https://your-report-server.com/upload
+          
+          # Parse JSON for detailed analysis
+          - cat reports/*.json | jq '.LatestExecution'
+        artifacts:
+          - reports/*
+```
+
+#### Example: Conditional Deployment Based on Scan Results
+
+```yaml
+    - step:
+        name: Deploy to Production
+        deployment: production
+        script:
+          # Only deploy if security scan passed
+          - source reports/scan_env.sh
+          
+          # Check security threshold
+          - |
+            if [ "$ASOC_CRITICAL_ISSUES" -eq 0 ] && [ "$ASOC_HIGH_ISSUES" -lt 3 ]; then
+              echo "✅ Security scan passed. Deploying to production..."
+              ./deploy.sh production
+            else
+              echo "⚠️ Security issues found. Manual review required."
+              echo "Critical: $ASOC_CRITICAL_ISSUES, High: $ASOC_HIGH_ISSUES"
+              exit 1
+            fi
 ```
 
 ### Building The Image
@@ -179,6 +314,9 @@ pipelines:
               -e DEBUG="true" `
               -e STATIC_ANALYSIS_ONLY="false" `
               -e OPEN_SOURCE_ONLY="false" `
+              -e ALLOW_UNTRUSTED="false" `
+              -e SCAN_SPEED="balanced" `
+              -e PERSONAL_SCAN="false" `
               -v "${localPath}:C:\src" `
               vndpal/bitbucket_asoc_sast:windows17
 

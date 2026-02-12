@@ -1,9 +1,9 @@
 # Bitbucket Pipe for HCL AppScan on Cloud Static Analysis
-This is a linux docker image that uses python to download the SAClientUtil from HCL AppScan on Cloud and run static analysis against an application in Bitbucket pipelines. The script also will wait for the scan to complete and download a scan summary json file and a scan report. These files are all placed in a directory "reports" so they can be saved as artifacts of the pipeline. See the bitbucket-pipelines.yml example below.
+This is a Windows docker image that uses python to download the SAClientUtil from HCL AppScan on Cloud and run static analysis against an application in Bitbucket pipelines. The script also will wait for the scan to complete and download a scan summary json file and a scan report. These files are all placed in a directory "reports" so they can be saved as artifacts of the pipeline. See the bitbucket-pipelines.yml example below.
 
 ### Variables
 
-The pipe has 8 variables.
+The pipe has 16 variables.
 
 | Variable |  Required | Description |
 |---|---|---|
@@ -11,10 +11,22 @@ The pipe has 8 variables.
 | API_KEY_SECRET | Required | The HCL AppScan on Cloud API Key Secret |
 | APP_ID | Required | The application Id of the app in AppScan on Cloud |
 | TARGET_DIR | Required | The directory to be scanned. Place scan targets here. |
+| CONFIG_FILE_PATH | Optional | Relative path from the repo root to an appscan config xml file. |
+| SECRET_SCANNING | Optional | True or False. Enables or disables the secret scanning feature. |
 | REPO | Optional | The Repository name. Only really used to make filenames and comments relevant. |
 | BUILD_NUM | Optional | The Bitbucket build number. Used to make filenames and comments relevant. |
-| SCAN_NAME | Optional | The name of the scan in AppScan on Cloud |
-| DEBUG | Optional | If true, prints additional debug info to the log. |
+| SCAN_NAME | Optional | The name of the scan in AppScan on Cloud. Default: "HCL_ASoC_SAST" |
+| DATACENTER | Optional | ASoC Datacenter to connect to: "NA" (default) or "EU", or an AppScan 360 url |
+| DEBUG | Optional | If true, prints additional debug info to the log. Default: false |
+| STATIC_ANALYSIS_ONLY | Optional | If true, only prepare for static analysis during IRX generation. Default: false |
+| OPEN_SOURCE_ONLY | Optional | If true, only gather opensource information during IRX generation. Default: false |
+| ALLOW_UNTRUSTED | Optional | If true, disables SSL certificate verification for HTTPS requests. Default: false (SSL verification enabled) |
+| SCAN_SPEED | Optional | Scan depth/speed: "simple" (quick checks), "balanced" (CI/CD), "deep" (default, thorough analysis), "thorough" (most comprehensive). Default: None (uses AppScan default) |
+| PERSONAL_SCAN | Optional | If true, creates a personal scan in AppScan on Cloud. Default: false |
+
+**Note:** Providing a config file can override other settings like `TARGET_DIR` or `SECRET_SCANNING`.
+
+**Security Note:** Only set `ALLOW_UNTRUSTED` to true in development/testing environments with self-signed certificates. In production, keep SSL verification enabled (default).
 
 ### Example bitbucket-pipelines.yml step
 
