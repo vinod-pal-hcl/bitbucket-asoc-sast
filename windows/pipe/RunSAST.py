@@ -28,7 +28,7 @@ import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from constants import (
-    VERSION, REVISION_DATE,
+    VERSION,
     SACLIENT_DOWNLOAD_ENDPOINT, APPSCAN_BIN_NAME,
     CONTENT_TYPE_ZIP,
     SCAN_FLAG_SAO, SCAN_FLAG_OSO,
@@ -120,15 +120,16 @@ class AppScanOnCloudSAST(Pipe):
         if len(self.get_variable('CONFIG_FILE_PATH')) > 0:
             configFile = os.path.join(self.cwd, self.get_variable('CONFIG_FILE_PATH'))
 
+        allow_untrusted = self.get_variable('ALLOW_UNTRUSTED')
+
         apikey = {
           "KeyId": apikeyid,
           "KeySecret": apikeysecret,
-          "ClientType": ASoC.getClientType(self)
         }
-        
-        allow_untrusted = self.get_variable('ALLOW_UNTRUSTED')
-
-        self.asoc = ASoC(apikey, self.datacenter, allow_untrusted)
+        self.asoc = ASoC(apikey, logger, self.datacenter, allow_untrusted)
+        client_type = self.asoc.getClientType()
+        self.asoc.apikey["ClientType"] = client_type
+        logger.info(f"Client Version: {client_type}")
         logger.info(MSG_PIPE_NAME)
         if(self.debug):
             logger.setLevel('DEBUG')
@@ -201,8 +202,14 @@ class AppScanOnCloudSAST(Pipe):
                 self.fail(message=MSG_PIPELINE_ERROR)
                 return False
                 
-        #Create Reports Dir if it does not exist 
-        reportsDir = os.path.join(self.cwd, REPORTS_DIR)
+        #Create Reports Dir if it does not exist
+        # Write reports to the parent of TARGET_DIR so they land inside
+        # the mounted volume (critical for Windows docker run where cwd
+        # may be outside the mount). For Linux pipes this resolves to
+        # the same workspace-relative path as before.
+        cloneParent = os.path.dirname(os.path.abspath(self.cloneDir))
+        reportsDir = os.path.join(cloneParent, REPORTS_DIR)
+        logger.info(f"Reports directory: {reportsDir}")
         if(not os.path.isdir(reportsDir)):
             logger.debug(f"Reports dir doesn't exists [{reportsDir}]")
             os.mkdir(reportsDir)

@@ -15,13 +15,13 @@
 #
 
 import requests
-from linux.pipe.constants import CLIENT_TYPE_FORMAT, VERSION
 import urllib3
 import time
 import subprocess
 import datetime
 import io
 import sys
+import platform
 import os
 import json
 from constants import (
@@ -34,17 +34,18 @@ from constants import (
     SCAN_STATUS_READY, SCAN_STATUS_ABORT,
     REPORT_WAIT_INTERVAL_SECS, REPORT_WAIT_TIMEOUT_SECS,
     MSG_ERROR_SUBMITTING_SCAN, MSG_ASOC_REPORT_STATUS, MSG_ASOC_APP_SUMMARY_ERROR,
-    TIMESTAMP_FORMAT,
+    TIMESTAMP_FORMAT, CLIENT_TYPE_FORMAT, VERSION
 )
 
 # Disable SSL warnings when bypassing certificate verification
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class ASoC:
-    def __init__(self, apikey, datacenter="NA", allow_untrusted=False):
+    def __init__(self, apikey, logger, datacenter="NA", allow_untrusted=False):
         self.apikey = apikey
         self.token = ""
         self.allow_untrusted = allow_untrusted
+        self.logger = logger
         if datacenter == DATACENTER_EU:
             self.base_url = DATACENTER_URL_ASOC_EU
         elif datacenter == DATACENTER_NA:
@@ -151,13 +152,14 @@ class ASoC:
         return None
     
     def createSastScan(self, scanName, appId, irxFileId, comment="", personal=False):
+        self.logger.info(f"Client Type for scan: {self.getClientType()}")
         data = {
             "ScanName": scanName,
             "AppId": appId,
             "Comment": comment,
             "ApplicationFileId": irxFileId,
             "Personal": personal,
-            "ClientType": self.getClientType(self)
+            "ClientType": self.getClientType()
         }
         headers = {
             "Content-Type": CONTENT_TYPE_JSON,
@@ -172,18 +174,19 @@ class ASoC:
             scanId = resp.json()["Id"]
             return scanId
         else:
-            print(MSG_ERROR_SUBMITTING_SCAN)
-            print(resp.json())
+            self.logger.error(MSG_ERROR_SUBMITTING_SCAN)
+            self.logger.error(resp.json())
             return None
 
     def createScaScan(self, scanName, appId, irxFileId, comment="", personal=False):
+        self.logger.info(f"Client Type for scan: {self.getClientType()}")
         data = {
             "ScanName": scanName,
             "AppId": appId,
             "Comment": comment,
             "ApplicationFileId": irxFileId,
             "Personal": personal,
-            "ClientType": self.getClientType(self)
+            "ClientType": self.getClientType()
         }
         headers = {
             "Content-Type": CONTENT_TYPE_JSON,
@@ -198,8 +201,8 @@ class ASoC:
             scanId = resp.json()["Id"]
             return scanId
         else:
-            print(MSG_ERROR_SUBMITTING_SCAN)
-            print(resp.json())
+            self.logger.error(MSG_ERROR_SUBMITTING_SCAN)
+            self.logger.error(resp.json())
             return None
     
     def getScanStatus(self, scanId):
@@ -226,8 +229,8 @@ class ASoC:
                 return executions[0]
             return None
         else:
-            print(MSG_ASOC_REPORT_STATUS)
-            print(resp)
+            self.logger.error(MSG_ASOC_REPORT_STATUS)
+            self.logger.error(resp)
             return None
             
     def getApplication(self, id):
@@ -243,7 +246,7 @@ class ASoC:
             app_info = self.checkAppExists(resp.json(), id)
             return app_info
         else:
-            print(MSG_ASOC_APP_SUMMARY_ERROR)
+            self.logger.error(MSG_ASOC_APP_SUMMARY_ERROR)
             return None
 
     def checkAppExists(self, response, id):
@@ -271,8 +274,8 @@ class ASoC:
         if(resp.status_code == 200):
             return resp.json()
         else:
-            print(resp.status_code)
-            print(resp.text)
+            self.logger.error(resp.status_code)
+            self.logger.error(resp.text)
             return None
         
     def ScaScanSummary(self, id, is_execution=False):
@@ -294,8 +297,8 @@ class ASoC:
         if(resp.status_code == 200):
             return resp.json()
         else:
-            print(resp.status_code)
-            print(resp.text)
+            self.logger.error(resp.status_code)
+            self.logger.error(resp.text)
             return None
         
     def startReport(self, id, reportConfig):
@@ -325,6 +328,8 @@ class ASoC:
         if(resp.status_code == 200):
             return resp.json()
         else:
+            self.logger.error(f"Failed to get report status for reportId: {reportId}")
+            self.logger.error(resp.text)
             return {"Status": SCAN_STATUS_ABORT, "Progress": 0}
             
     def waitForReport(self, reportId, intervalSecs=REPORT_WAIT_INTERVAL_SECS, timeoutSecs=REPORT_WAIT_TIMEOUT_SECS):
@@ -359,5 +364,5 @@ class ASoC:
         return datetime.datetime.fromtimestamp(ts).strftime(TIMESTAMP_FORMAT)
 
     def getClientType(self):
-        os = sys.platform.system().lower()
-        return CLIENT_TYPE_FORMAT.replace("<os>", os).replace("<version>", VERSION)
+        os_name = platform.system().lower()
+        return CLIENT_TYPE_FORMAT.replace("<os>", os_name).replace("<plugin-version>", VERSION)

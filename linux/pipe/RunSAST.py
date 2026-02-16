@@ -29,7 +29,7 @@ import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from constants import (
-    VERSION, REVISION_DATE,
+    VERSION,
     SACLIENT_DOWNLOAD_ENDPOINT, APPSCAN_BIN_NAME,
     CONTENT_TYPE_ZIP,
     SCAN_FLAG_SAO, SCAN_FLAG_OSO,
@@ -43,7 +43,7 @@ from constants import (
     DEFAULT_REPORT_TITLE, DEFAULT_REPORT_FILE_TYPE,
     MSG_PIPE_NAME, MSG_PIPELINE_ERROR, MSG_PIPELINE_SUCCESS,
     MSG_BOTH_OSO_SAO, MSG_SCAN_COMMENT,
-    TIMESTAMP_FORMAT, VERSION, CLIENT_TYPE_FORMAT
+    TIMESTAMP_FORMAT,
 )
 
 # Disable SSL warnings when bypassing certificate verification
@@ -130,18 +130,19 @@ class AppScanOnCloudSAST(Pipe):
         if len(self.get_variable('CONFIG_FILE_PATH')) > 0:
             configFile = os.path.join(self.cwd, self.get_variable('CONFIG_FILE_PATH'))
 
-        apikey = {
-            "KeyId": apikeyid,
-            "KeySecret": apikeysecret,
-            "ClientType": self.asoc.getClientType(self)
-        }
-        
         allow_untrusted = self.get_variable('ALLOW_UNTRUSTED')
 
         #self.code_insights = CodeInsights(self.repo, self.repoOwner, auth_type="authless")
-        self.asoc = ASoC(apikey, self.datacenter, allow_untrusted)
+        apikey = {
+            "KeyId": apikeyid,
+            "KeySecret": apikeysecret,
+        }
+        self.asoc = ASoC(apikey, logger, self.datacenter, allow_untrusted)
+        client_type = self.asoc.getClientType()
+        self.asoc.apikey["ClientType"] = client_type
+        logger.info(f"Client Type for scan: {client_type}")
         logger.info(MSG_PIPE_NAME)
-        logger.info(f"\tVersion: {VERSION} rev {REVISION_DATE}")
+        logger.info(f"\tVersion: {VERSION}")
         if(self.debug):
             logger.setLevel('DEBUG')
             logger.info("Debug logging enabled")

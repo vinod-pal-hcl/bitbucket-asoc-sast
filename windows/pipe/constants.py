@@ -22,7 +22,7 @@ Modify values here to apply changes across the entire pipe.
 # =============================================================================
 # Version Information
 # =============================================================================
-VERSION = "1.1.1"
+VERSION = "2.0.0"
 
 # =============================================================================
 # Datacenter Configuration
@@ -132,3 +132,4 @@ MSG_ASOC_APP_SUMMARY_ERROR = "ASoC App Summary Error Response"
 # Timestamp Format
 # =============================================================================
 TIMESTAMP_FORMAT = '%Y-%m-%d_%H-%M-%S'
+CLIENT_TYPE_FORMAT = "bitbucket-<os>-<plugin-version>"
