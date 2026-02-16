@@ -1,3 +1,19 @@
+#
+# Copyright 2026 HCL America, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 from bitbucket_pipes_toolkit import Pipe, get_logger
 from ASoC import ASoC
 import requests
@@ -10,6 +26,24 @@ import zipfile
 import re
 import datetime
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from constants import (
+    VERSION, REVISION_DATE,
+    SACLIENT_DOWNLOAD_ENDPOINT, APPSCAN_BIN_NAME,
+    CONTENT_TYPE_ZIP,
+    SCAN_FLAG_SAO, SCAN_FLAG_OSO,
+    SCAN_STATUS_READY, SCAN_STATUS_ABORT,
+    SCAN_POLL_INTERVAL_SECS, SCAN_LOG_INTERVAL_SECS,
+    REPORT_POLL_INTERVAL_SECS, DOWNLOAD_LOG_INTERVAL_SECS,
+    DOWNLOAD_CHUNK_SIZE, BYTES_PER_MB, FILE_PERMISSION_MODE, SECONDS_PER_DAY,
+    SACLIENT_DIR, TARGET_DIR, REPORTS_DIR,
+    SACLIENT_ZIP_FILENAME, SCAN_RESULTS_FILENAME, SCAN_ENV_FILENAME, REPORT_PATHS_FILENAME,
+    SCAN_NAME_VALID_CHARS_REGEX, SCAN_NAME_REPLACEMENT_CHAR,
+    DEFAULT_REPORT_TITLE, DEFAULT_REPORT_FILE_TYPE,
+    MSG_PIPE_NAME, MSG_PIPELINE_ERROR, MSG_PIPELINE_SUCCESS,
+    MSG_BOTH_OSO_SAO, MSG_SCAN_COMMENT,
+    TIMESTAMP_FORMAT,
+)
 
 # Disable SSL warnings when bypassing certificate verification
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -17,7 +51,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = get_logger()
 
 schema = {
-    'SCAN_NAME': {'type': 'string', 'required': False, 'default': "HCL_ASoC_SAST"},
+    'SCAN_NAME': {'type': 'string', 'required': False, 'default': ""},
     'DATACENTER': {'type': 'string', 'required': False, 'default': "NA"},
     'SECRET_SCANNING': {'type': 'boolean', 'required': False, 'default': None},
     'CONFIG_FILE_PATH': {'type': 'string', 'required': False, 'default': ""},
@@ -65,21 +99,22 @@ class AppScanOnCloudSAST(Pipe):
         self.repo_full_name = env.get('BITBUCKET_REPO_FULL_NAME', "")
         branch = env.get('BITBUCKET_BRANCH', "")
         self.commit = env.get('BITBUCKET_COMMIT', "")
+        projectKey = env.get('BITBUCKET_PROJECT_KEY', "")
         self.repoOwner = env.get('BITBUCKET_REPO_OWNER', "")
         self.cwd = os.getcwd()
 
         if(self.static_analysis_only and self.open_source_only):
             logger.error("Cannot run IRGen with both 'Open Source Only' and 'Static Analysis Only' options")
-            self.fail(message="Both OSO and SAO selected")
+            self.fail(message=MSG_BOTH_OSO_SAO)
             return False
 
         scan_flag = None
         if(self.static_analysis_only):
             logger.info("Setting scan mode to SAO")
-            scan_flag = '-sao'
+            scan_flag = SCAN_FLAG_SAO
         if(self.open_source_only):
             logger.info("Setting scan mode to OSO")
-            scan_flag = '-oso'
+            scan_flag = SCAN_FLAG_OSO
 
         configFile = None
         if len(self.get_variable('CONFIG_FILE_PATH')) > 0:
@@ -87,31 +122,71 @@ class AppScanOnCloudSAST(Pipe):
 
         apikey = {
           "KeyId": apikeyid,
-          "KeySecret": apikeysecret
+          "KeySecret": apikeysecret,
+          "ClientType": ASoC.getClientType(self)
         }
         
         allow_untrusted = self.get_variable('ALLOW_UNTRUSTED')
 
         self.asoc = ASoC(apikey, self.datacenter, allow_untrusted)
-        logger.info("Executing Pipe: HCL AppScan on Cloud SAST")
+        logger.info(MSG_PIPE_NAME)
         if(self.debug):
             logger.setLevel('DEBUG')
             logger.info("Debug logging enabled")
 
-        scanName = re.sub('[^a-zA-Z0-9\s_\-\.]', '_', scanName)+"_"+self.getTimeStamp()
-        comment = "This scan was created via BitBucket Pipeline"
+        # Use Bitbucket repo name if scan name not provided
+        if not scanName:
+            scanName = self.repo
+        
+        #valid chars for a scan name: alphanumeric + [.-_ ]
+        scanName = re.sub(SCAN_NAME_VALID_CHARS_REGEX, SCAN_NAME_REPLACEMENT_CHAR, scanName)
+        comment = MSG_SCAN_COMMENT
         
         logger.info("========== Step 0: Preparation ====================")
         #Copy contents of the clone dir to the target dir
-        targetDir = os.path.join(self.cwd, "target")
+        logger.info(f"SCAN_NAME: {scanName}")
+        logger.info(f"APP_ID: {self.appID}")
+        logger.info(f"BUILD_NUM: {buildNum}")
+        logger.info(f"TARGET_DIR: {self.cloneDir}")
+        if configFile is not None:
+            logger.info(f"CONFIG_FILE_PATH: {configFile}")
+        else:
+            logger.info(f"CONFIG_FILE_PATH: Not Specified")
+        logger.info(f"DATACENTER: {self.datacenter}")
+        logger.info(f"SECRET_SCANNING: {self.secret_scanning}")
+        logger.info(f"SCAN_SPEED: {self.scan_speed}")
+        logger.info(f"DEBUG: {self.debug}")
+        logger.debug(f"REPO: {self.repo}")
+        logger.debug(f"REPO_FULL: {self.repo_full_name}")
+        logger.debug(f"BRANCH: {branch}")
+        logger.debug(f"COMMIT: {self.commit}")
+        logger.debug(f"PROJECT_KEY: {projectKey}")
+        logger.debug(f"REPO_OWNER: {self.repoOwner}")
+        logger.debug(f"Current Working Dir: {self.cwd}")
+        targetDir = os.path.join(self.cwd, TARGET_DIR)
+        logger.debug(f"SCAN TARGET: {targetDir}")
+
+        cwd_dir_list = os.listdir(self.cwd)
+        logger.debug(cwd_dir_list)
+        clone_dir_list = os.listdir(self.cloneDir)
+        logger.debug(clone_dir_list)
+
+        # Check if config file actually exists
+        if configFile is not None:
+            if not os.path.exists(configFile):
+                logger.error(f"Config Path Does Not Exist: {configFile}")
+                logger.error(f"Using Defaults")
+                configFile = None
+
+
         logger.info(f"Copying [{self.cwd}] to [{targetDir}]")
         if(shutil.copytree(self.cloneDir, targetDir) is None):
             logger.error("Cannot copy build clone dir into target dir")
-            self.fail(message="Error Running ASoC SAST Pipeline")
+            self.fail(message=MSG_PIPELINE_ERROR)
             return False
             
         #Create the saclient dir if it doesn not exist
-        saclientPath = os.path.join(self.cwd, "saclient")
+        saclientPath = os.path.join(self.cwd, SACLIENT_DIR)
         if(not os.path.isdir(saclientPath)):
             logger.debug(f"SAClient Path [{saclientPath}] does not exist")
             try:
@@ -119,27 +194,27 @@ class AppScanOnCloudSAST(Pipe):
                 logger.info(f"Created dir [{saclientPath}]")
             except:
                 logger.error(f"Error creating saclient path [{saclientPath}]")
-                self.fail(message="Error Running ASoC SAST Pipeline")
+                self.fail(message=MSG_PIPELINE_ERROR)
                 return False
             if(not os.path.isdir(saclientPath)):
                 logger.error(f"Error creating saclient path [{saclientPath}]")
-                self.fail(message="Error Running ASoC SAST Pipeline")
+                self.fail(message=MSG_PIPELINE_ERROR)
                 return False
                 
         #Create Reports Dir if it does not exist 
-        reportsDir = os.path.join(self.cwd, "reports")
+        reportsDir = os.path.join(self.cwd, REPORTS_DIR)
         if(not os.path.isdir(reportsDir)):
             logger.debug(f"Reports dir doesn't exists [{reportsDir}]")
             os.mkdir(reportsDir)
             if(not os.path.isdir(reportsDir)):
                 logger.error(f"Cannot create reports dir! [{reportsDir}]")
-                self.fail(message="Error Running ASoC SAST Pipeline")
+                self.fail(message=MSG_PIPELINE_ERROR)
                 return False
             else:
                 logger.info(f"Created dir [{reportsDir}]")
         #Make sure we have write permission on the reports dir
         logger.info("Setting permissions on reports dir")
-        os.chmod(reportsDir, 755)
+        os.chmod(reportsDir, FILE_PERMISSION_MODE)
         logger.info("========== Step 0: Complete =======================\n")
         
         #Step 1: Download the SACLientUtil
@@ -147,53 +222,62 @@ class AppScanOnCloudSAST(Pipe):
         appscanPath = self.getSAClient(saclientPath)
         if(appscanPath is None):
             logger.error("AppScan Path not found, something went wrong with SACLientUtil Download?")
-            self.fail(message="Error Running ASoC SAST Pipeline")
+            self.fail(message=MSG_PIPELINE_ERROR)
             return False
         logger.info("========== Step 1: Complete =======================\n")
 
         #Step 2: Generate the IRX
         logger.info("========== Step 2: Generate IRX File ==============")
-        irxPath = self.genIrx(scanName, appscanPath, targetDir, reportsDir, scan_flag, configFile, self.secret_scanning)
+        if configFile is None:
+            logger.info("Config file not specified. Using defaults.")
+            
+        irxPath = self.genIrx(scanName, appscanPath, targetDir, reportsDir, scan_flag, configFile, self.secret_scanning, self.scan_speed)
         if(irxPath is None):
             logger.error("IRX File Not Generated.")
-            self.fail(message="Error Running ASoC SAST Pipeline")
+            self.fail(message=MSG_PIPELINE_ERROR)
             return False
         logger.info("========== Step 2: Complete =======================\n")
 
-        #Step 3: Run the Scan
+        #Step 3: Run the Scan(s)
         logger.info("========== Step 3: Run the Scan on ASoC ===========")
-        scanId = self.runScan(scanName, self.appID, irxPath, comment, True, self.personal_scan)
-        if(scanId is None):
-            logger.error("Error creating scan")
-            self.fail(message="Error Running ASoC SAST Pipeline")
+        scan_result = self.runScan(scanName, self.appID, irxPath, comment, True, self.personal_scan)
+        if(scan_result is None):
+            logger.error("Error creating scan(s)")
+            self.fail(message=MSG_PIPELINE_ERROR)
             return False
+        sast_scan_id = scan_result.get('sast_scan_id')
+        sca_scan_id = scan_result.get('sca_scan_id')
+        # For backward compatibility
+        self.scanID = sast_scan_id or sca_scan_id
         logger.info("========== Step 3: Complete =======================\n")
 
         #Step 4: Get the Scan Summary
         logger.info("========== Step 4: Fetch Scan Summary =============")      
-        summaryFileName = scanName+".json"
-        summaryPath = os.path.join(reportsDir, summaryFileName)
-        logger.debug("Fetching Scan Summary")
-        summary = self.getScanSummary(scanId, summaryPath)
-        if(summary is None):
-            logger.error("Error getting scan summary")
-        else:
-            seconds = summary["duration_seconds"] % (24 * 3600)
-            hour = seconds // 3600
-            seconds %= 3600
-            minutes = seconds // 60
-            seconds %= 60
-            durationStr = "%d:%02d:%02d" % (hour, minutes, seconds)
-            logger.info("Scan Summary:")
-            logger.info(f"\tDuration: {durationStr}")
-            logger.info(f'\tTotal Issues: {summary["total_issues"]}')
-            logger.info(f'\t\tHigh Issues: {summary["high_issues"]}')
-            logger.info(f'\t\tMed Issues: {summary["medium_issues"]}')
-            logger.info(f'\t\tLow Issues: {summary["low_issues"]}')
-            logger.debug("Scan Summary:\n"+json.dumps(summary, indent=2))
-            
+        summaries = {}
+        summary_paths = {}
+        for scan_type, scan_id in [('SAST', sast_scan_id), ('SCA', sca_scan_id)]:
+            if scan_id is None:
+                continue
+            summaryFileName = scanName + f"_{scan_type.lower()}.json"
+            sSummaryPath = os.path.join(reportsDir, summaryFileName)
+            summary_paths[scan_type] = sSummaryPath
+            logger.debug(f"Fetching {scan_type} Scan Summary")
+            scan_summary = self.getScanSummary(scan_id, sSummaryPath)
+            if scan_summary is None:
+                logger.error(f"Error getting {scan_type} scan summary")
+            else:
+                summaries[scan_type] = scan_summary
+                self._logScanSummary(scan_type, scan_summary)
+        
+        combined_summary = self._combineSummaries(summaries) if summaries else None
+        if combined_summary:
+            if len(summaries) > 1:
+                logger.info("Combined Summary (SAST + SCA):")
+                self._logScanSummary("Combined", combined_summary)
             # Export scan results for use in subsequent pipeline steps
-            self.exportScanResults(summary, scanId, reportsDir)
+            self.exportScanResults(combined_summary, scan_result, reportsDir)
+        else:
+            logger.error("No scan summaries available")
         logger.info("========== Step 4: Complete =======================\n")
         
 
@@ -204,31 +288,37 @@ class AppScanOnCloudSAST(Pipe):
             notes += f"Bitbucket Repo: {self.repo} "
         if(buildNum!=0):
             notes += f"Build: {buildNum}"
-        reportFileName = scanName+".html"
-        reportPath = os.path.join(reportsDir, reportFileName)
-        report = self.getReport(scanId, reportPath, notes)
-        if(report is None):
-            logger.error("Error downloading report")
-            self.fail(message="Error Running ASoC SAST Pipeline")
-            return False
-        logger.info(f"Report Downloaded [{reportPath}]")
+        report_paths = {}
+        for scan_type, scan_id in [('SAST', sast_scan_id), ('SCA', sca_scan_id)]:
+            if scan_id is None:
+                continue
+            reportFileName = scanName + f"_{scan_type.lower()}.html"
+            reportPath = os.path.join(reportsDir, reportFileName)
+            logger.info(f"Downloading {scan_type} report...")
+            report = self.getReport(scan_id, reportPath, notes)
+            if(report is None):
+                logger.error(f"Error downloading {scan_type} report")
+                self.fail(message=MSG_PIPELINE_ERROR)
+                return False
+            logger.info(f"{scan_type} Report Downloaded [{reportPath}]")
+            report_paths[scan_type] = reportPath
         
         # Export report paths for downstream consumption
-        self.exportReportPaths(reportPath, summaryPath, reportsDir)
+        self.exportReportPaths(report_paths, summary_paths, reportsDir)
         logger.info("========== Step 5: Complete =======================\n")
         
         # Step 6: Check for Non-Compliance (if enabled)
-        if self.wait_for_analysis and self.fail_for_noncompliance and summary is not None:
+        if self.wait_for_analysis and self.fail_for_noncompliance and combined_summary is not None:
             logger.info("========== Step 6: Compliance Check ===============")
-            issues_at_threshold = self.getIssuesAtOrAboveThreshold(summary, self.failure_threshold)
+            issues_at_threshold = self.getIssuesAtOrAboveThreshold(combined_summary, self.failure_threshold)
             if issues_at_threshold > 0:
                 logger.error(f"Non-compliance detected: {issues_at_threshold} issue(s) found at or above '{self.failure_threshold}' severity threshold")
                 logger.error(f"  Threshold: {self.failure_threshold}")
-                logger.error(f"  Critical Issues: {summary['critical_issues']}")
-                logger.error(f"  High Issues: {summary['high_issues']}")
-                logger.error(f"  Medium Issues: {summary['medium_issues']}")
-                logger.error(f"  Low Issues: {summary['low_issues']}")
-                logger.error(f"  Informational Issues: {summary['info_issues']}")
+                logger.error(f"  Critical Issues: {combined_summary['critical_issues']}")
+                logger.error(f"  High Issues: {combined_summary['high_issues']}")
+                logger.error(f"  Medium Issues: {combined_summary['medium_issues']}")
+                logger.error(f"  Low Issues: {combined_summary['low_issues']}")
+                logger.error(f"  Informational Issues: {combined_summary['info_issues']}")
                 logger.info("========== Step 6: FAILED =========================\n")
                 self.fail(message=f"Security scan failed: {issues_at_threshold} issue(s) at or above {self.failure_threshold} severity")
                 return False
@@ -236,20 +326,71 @@ class AppScanOnCloudSAST(Pipe):
                 logger.info(f"No issues found at or above '{self.failure_threshold}' severity threshold")
                 logger.info("========== Step 6: Complete =======================\n")
         
-        self.success(message="ASoC SAST Pipeline Complete")
+        self.success(message=MSG_PIPELINE_SUCCESS)
+
+    def _logScanSummary(self, label, summary):
+        """Log a scan summary with a label."""
+        seconds = summary["duration_seconds"] % SECONDS_PER_DAY
+        hour = seconds // 3600
+        seconds %= 3600
+        minutes = seconds // 60
+        seconds %= 60
+        durationStr = "%d:%02d:%02d" % (hour, minutes, seconds)
+        logger.info(f"{label} Scan Summary:")
+        logger.info(f"\tDuration: {durationStr}")
+        logger.info(f'\tTotal Issues: {summary["total_issues"]}')
+        logger.info(f'\t\tCritical Issues: {summary["critical_issues"]}')
+        logger.info(f'\t\tHigh Issues: {summary["high_issues"]}')
+        logger.info(f'\t\tMed Issues: {summary["medium_issues"]}')
+        logger.info(f'\t\tLow Issues: {summary["low_issues"]}')
+        logger.info(f'\t\tInfo Issues: {summary["info_issues"]}')
+        logger.debug(f"{label} Scan Summary:\n" + json.dumps(summary, indent=2))
+
+    def _combineSummaries(self, summaries):
+        """Combine multiple scan summaries into a single aggregated summary.
         
-    def exportScanResults(self, summary, scanId, reportsDir):
+        Args:
+            summaries: dict keyed by scan type ('SAST', 'SCA') with summary dicts as values
+        
+        Returns:
+            Combined summary dict with aggregated issue counts
+        """
+        if not summaries:
+            return None
+        if len(summaries) == 1:
+            return list(summaries.values())[0]
+        
+        combined = {
+            "scan_name": " + ".join(s.get("scan_name", "Unknown") for s in summaries.values()),
+            "scan_ids": {k: v.get("scan_id") for k, v in summaries.items()},
+            "duration_seconds": max(s.get("duration_seconds", 0) for s in summaries.values()),
+            "critical_issues": sum(s.get("critical_issues", 0) for s in summaries.values()),
+            "high_issues": sum(s.get("high_issues", 0) for s in summaries.values()),
+            "medium_issues": sum(s.get("medium_issues", 0) for s in summaries.values()),
+            "low_issues": sum(s.get("low_issues", 0) for s in summaries.values()),
+            "info_issues": sum(s.get("info_issues", 0) for s in summaries.values()),
+            "total_issues": sum(s.get("total_issues", 0) for s in summaries.values()),
+        }
+        return combined
+        
+    def exportScanResults(self, summary, scan_result, reportsDir):
         """
         Export scan results as environment variables and output files
         for use in subsequent Bitbucket Pipeline steps
         """
+        sast_scan_id = scan_result.get('sast_scan_id', '')
+        sca_scan_id = scan_result.get('sca_scan_id', '')
+        
         # Create output files that can be sourced in bash or parsed
-        outputFile = os.path.join(reportsDir, "scan_results.txt")
-        envFile = os.path.join(reportsDir, "scan_env.sh")
+        outputFile = os.path.join(reportsDir, SCAN_RESULTS_FILENAME)
+        envFile = os.path.join(reportsDir, SCAN_ENV_FILENAME)
         
         # Write human-readable output
         with open(outputFile, 'w') as f:
-            f.write(f"SCAN_ID={scanId}\n")
+            if sast_scan_id:
+                f.write(f"SAST_SCAN_ID={sast_scan_id}\n")
+            if sca_scan_id:
+                f.write(f"SCA_SCAN_ID={sca_scan_id}\n")
             f.write(f"SCAN_NAME={summary['scan_name']}\n")
             f.write(f"TOTAL_ISSUES={summary['total_issues']}\n")
             f.write(f"CRITICAL_ISSUES={summary['critical_issues']}\n")
@@ -258,11 +399,17 @@ class AppScanOnCloudSAST(Pipe):
             f.write(f"LOW_ISSUES={summary['low_issues']}\n")
             f.write(f"INFO_ISSUES={summary['info_issues']}\n")
             f.write(f"SCAN_DURATION_SECONDS={summary['duration_seconds']}\n")
-            f.write(f"CREATED_AT={summary['createdAt']}\n")
+            if 'createdAt' in summary:
+                f.write(f"CREATED_AT={summary['createdAt']}\n")
         
         # Write shell-sourceable environment variables
         with open(envFile, 'w') as f:
-            f.write(f"export ASOC_SCAN_ID='{scanId}'\n")
+            if sast_scan_id:
+                f.write(f"export ASOC_SAST_SCAN_ID='{sast_scan_id}'\n")
+                f.write(f"export ASOC_SAST_SCAN_URL='{self.asoc.getDataCenterURL()}/main/myapps/{self.appID}/scans/{sast_scan_id}'\n")
+            if sca_scan_id:
+                f.write(f"export ASOC_SCA_SCAN_ID='{sca_scan_id}'\n")
+                f.write(f"export ASOC_SCA_SCAN_URL='{self.asoc.getDataCenterURL()}/main/myapps/{self.appID}/scans/{sca_scan_id}'\n")
             f.write(f"export ASOC_SCAN_NAME='{summary['scan_name']}'\n")
             f.write(f"export ASOC_TOTAL_ISSUES={summary['total_issues']}\n")
             f.write(f"export ASOC_CRITICAL_ISSUES={summary['critical_issues']}\n")
@@ -271,20 +418,27 @@ class AppScanOnCloudSAST(Pipe):
             f.write(f"export ASOC_LOW_ISSUES={summary['low_issues']}\n")
             f.write(f"export ASOC_INFO_ISSUES={summary['info_issues']}\n")
             f.write(f"export ASOC_SCAN_DURATION_SECONDS={summary['duration_seconds']}\n")
-            f.write(f"export ASOC_SCAN_URL='{self.asoc.getDataCenterURL()}/main/myapps/{self.appID}/scans/{scanId}'\n")
         
         logger.info(f"Scan results exported to: {outputFile}")
         logger.info(f"Environment variables exported to: {envFile}")
         logger.info("To use in next pipeline step, add 'source reports/scan_env.sh' or parse scan_results.txt")
 
-    def exportReportPaths(self, reportPath, summaryPath, reportsDir):
+    def exportReportPaths(self, report_paths, summary_paths, reportsDir):
         """
         Export report file paths for artifact collection
+        
+        Args:
+            report_paths: dict keyed by scan type ('SAST', 'SCA') with HTML report paths
+            summary_paths: dict keyed by scan type ('SAST', 'SCA') with JSON summary paths
+            reportsDir: path to reports directory
         """
-        pathsFile = os.path.join(reportsDir, "report_paths.txt")
+        pathsFile = os.path.join(reportsDir, REPORT_PATHS_FILENAME)
         with open(pathsFile, 'w') as f:
-            f.write(f"HTML_REPORT={reportPath}\n")
-            f.write(f"JSON_SUMMARY={summaryPath}\n")
+            for scan_type in ['SAST', 'SCA']:
+                if scan_type in report_paths:
+                    f.write(f"{scan_type}_HTML_REPORT={report_paths[scan_type]}\n")
+                if scan_type in summary_paths:
+                    f.write(f"{scan_type}_JSON_SUMMARY={summary_paths[scan_type]}\n")
             f.write(f"REPORTS_DIR={reportsDir}\n")
         
         logger.info(f"Report paths exported to: {pathsFile}")
@@ -292,10 +446,13 @@ class AppScanOnCloudSAST(Pipe):
         logger.info("=" * 55)
         logger.info("PIPELINE OUTPUT SUMMARY")
         logger.info("=" * 55)
-        logger.info(f"HTML Report: {reportPath}")
-        logger.info(f"JSON Summary: {summaryPath}")
-        logger.info(f"Scan Results: {os.path.join(reportsDir, 'scan_results.txt')}")
-        logger.info(f"Environment File: {os.path.join(reportsDir, 'scan_env.sh')}")
+        for scan_type in ['SAST', 'SCA']:
+            if scan_type in report_paths:
+                logger.info(f"{scan_type} HTML Report: {report_paths[scan_type]}")
+            if scan_type in summary_paths:
+                logger.info(f"{scan_type} JSON Summary: {summary_paths[scan_type]}")
+        logger.info(f"Scan Results: {os.path.join(reportsDir, SCAN_RESULTS_FILENAME)}")
+        logger.info(f"Environment File: {os.path.join(reportsDir, SCAN_ENV_FILENAME)}")
         logger.info("")
         logger.info("To use these outputs in your bitbucket-pipelines.yml:")
         logger.info("1. Add artifacts section to preserve reports/")
@@ -340,8 +497,8 @@ class AppScanOnCloudSAST(Pipe):
     #download and unzip SAClientUtil to {cwd}/saclient
     def getSAClient(self, saclientPath="saclient"):
         #Downloading SAClientUtil
-        url = self.asoc.getDataCenterURL() + "/api/v4/Tools/SAClientUtil?os=win"
-        logger.info("Downloading SAClientUtil Zip")
+        url = self.asoc.getDataCenterURL() + SACLIENT_DOWNLOAD_ENDPOINT
+        logger.info(f"Downloading SAClientUtil Zip from: {url}")
         try:
             if self.asoc.allow_untrusted:
                 r = requests.get(url, stream=True, verify=False)
@@ -362,11 +519,11 @@ class AppScanOnCloudSAST(Pipe):
         disposition = r.headers.get("content-disposition")
         if disposition is None:
             logger.warning("'content-disposition' header missing in response")
-        chunk_size = 4096
+        chunk_size = DOWNLOAD_CHUNK_SIZE
         xfered = 0
         percent = 0
         start = time.time()
-        save_path = os.path.join(self.cwd, "saclient.zip")
+        save_path = os.path.join(self.cwd, SACLIENT_ZIP_FILENAME)
         with open(save_path, 'wb') as fd:
             for chunk in r.iter_content(chunk_size=chunk_size):
                 fd.write(chunk)
@@ -375,13 +532,13 @@ class AppScanOnCloudSAST(Pipe):
                     percent = round((xfered/file_size)*100)
                 else:
                     percent = 0
-                if(time.time()-start > 3):
+                if(time.time()-start > DOWNLOAD_LOG_INTERVAL_SECS):
                     logger.info(f"SAClientUtil Download: {percent}%")
                     start = time.time()
         logger.info(f"SAClientUtil Download: {percent}%")
 
         # Check if the downloaded file is a valid zip
-        if r.headers.get('content-type', '').lower() != 'application/zip':
+        if r.headers.get('content-type', '').lower() != CONTENT_TYPE_ZIP:
             logger.error(f"Unexpected content-type: {r.headers.get('content-type')}")
             with open(save_path, 'rb') as f:
                 sample = f.read(20000)
@@ -405,16 +562,16 @@ class AppScanOnCloudSAST(Pipe):
         logger.info("Setting permissions on SACLientUtil Files")
         for root, dirs, files in os.walk(saclientPath):
             for d in dirs:
-                os.chmod(os.path.join(root, d), 755)
+                os.chmod(os.path.join(root, d), FILE_PERMISSION_MODE)
             for f in files:
-                os.chmod(os.path.join(root, f), 755)
+                os.chmod(os.path.join(root, f), FILE_PERMISSION_MODE)
 
         #Find the appscan executable
         logger.debug("Finding appscan bin path")
         appscanPath = None
         dirs = os.listdir(saclientPath)
         for file in dirs:
-            appscanPath = os.path.join(self.cwd, saclientPath, file, "bin", "appscan.bat")
+            appscanPath = os.path.join(self.cwd, saclientPath, file, "bin", APPSCAN_BIN_NAME)
 
         if(os.path.exists(appscanPath)):
             logger.debug(f"AppScan Bin Path [{appscanPath}]")
@@ -462,9 +619,40 @@ class AppScanOnCloudSAST(Pipe):
         logger.error(f"IRX File does not exist [{irxPath}]")
         return None
     
-    #Create the SAST scan based on an IRX File
-    #If Wait=True the function will sleep until the scan is complete
+    #Create the SAST/SCA scan(s) based on an IRX File
+    #If Wait=True the function will sleep until the scan(s) are complete
+    def _waitForScan(self, scanId, label=""):
+        """Wait for a single scan to complete. Returns (scanId, execution)."""
+        logger.info(f"Waiting for {label} scan [{scanId}] to complete (status=Ready)")
+        execution = self.asoc.getScanStatus(scanId)
+        status = execution["Status"] if execution else SCAN_STATUS_ABORT
+        start = time.time()
+        while(status not in [SCAN_STATUS_READY, SCAN_STATUS_ABORT]):
+            if(time.time()-start >= SCAN_LOG_INTERVAL_SECS):
+                logger.info(f"\t{label} scan still running...(status={status})")
+                start = time.time()
+            time.sleep(SCAN_POLL_INTERVAL_SECS)
+            execution = self.asoc.getScanStatus(scanId)
+            status = execution["Status"] if execution else SCAN_STATUS_ABORT
+        
+        if(status == SCAN_STATUS_READY):
+            logger.info(f"{label} Scan [{scanId}] Complete")
+        else:
+            logger.error(f"{label} scan returned invalid status... check login?")
+            logger.error("If script continues, the scan might not be complete")
+            execution = None
+        return (scanId, execution)
+
     def runScan(self, scanName, appId, irxPath, comment="", wait=True, personal_scan=False):
+        """Create and run scan(s) based on scan mode.
+        
+        Returns a dict with 'sast_scan_id' and/or 'sca_scan_id' keys,
+        or None on error.
+        
+        - STATIC_ANALYSIS_ONLY: runs SAST scan only
+        - OPEN_SOURCE_ONLY: runs SCA scan only
+        - Neither: runs both SAST and SCA scans in parallel
+        """
         #Verify that ASoC is logged in, if not then login
         logger.debug("Login to ASoC")
         if(not self.asoc.checkAuth()):
@@ -485,52 +673,80 @@ class AppScanOnCloudSAST(Pipe):
             logger.error("Invalid AppId: App Not Found!")
             return None
         
-        scanName = appName+"_"+scanName
         #Upload the IRX File and get a FileId
         logger.debug("Uploading IRX File")
         fileId = self.asoc.uploadFile(irxPath)
         if(fileId is None):
             logger.error("Error uploading IRX File")
+            return None
         logger.debug(f"IRX FileId: [{fileId}]")
         
-        #Run the Scan
-        logger.debug("Running Scan")
-        scanId = self.asoc.createSastScan(scanName, appId, fileId, comment, personal_scan)
+        #Create scan(s) based on mode
+        scan_result = {}
         
-        if(scanId):
-            logger.info("Scan Created")
-            logger.info(f"ScanId: [{scanId}]")
+        if self.static_analysis_only:
+            logger.info("Creating SAST scan (Static Analysis Only)")
+            sast_id = self.asoc.createSastScan(scanName, appId, fileId, comment, personal_scan)
+            if sast_id:
+                scan_result['sast_scan_id'] = sast_id
+                logger.info(f"SAST ScanId: [{sast_id}]")
+            else:
+                logger.error("SAST scan not created!")
+                return None
+        elif self.open_source_only:
+            logger.info("Creating SCA scan (Open Source Only)")
+            sca_id = self.asoc.createScaScan(scanName, appId, fileId, comment, personal_scan)
+            if sca_id:
+                scan_result['sca_scan_id'] = sca_id
+                logger.info(f"SCA ScanId: [{sca_id}]")
+            else:
+                logger.error("SCA scan not created!")
+                return None
         else:
-            logger.error("Scan not created!")
-            return None
-            
-        #If Wait=False, return now with scanId
+            logger.info("Creating both SAST and SCA scans")
+            sast_id = self.asoc.createSastScan(scanName, appId, fileId, comment, personal_scan)
+            sca_id = self.asoc.createScaScan(scanName, appId, fileId, comment, personal_scan)
+            if sast_id:
+                scan_result['sast_scan_id'] = sast_id
+                logger.info(f"SAST ScanId: [{sast_id}]")
+            else:
+                logger.error("SAST scan not created!")
+                return None
+            if sca_id:
+                scan_result['sca_scan_id'] = sca_id
+                logger.info(f"SCA ScanId: [{sca_id}]")
+            else:
+                logger.error("SCA scan not created!")
+                return None
+        
+        #If Wait=False, return now with scan_result
         if(wait == False):
-            logger.info("Do not wait for scan to complete, return immediatly")
-            return scanId
+            logger.info("Do not wait for scan(s) to complete, return immediately")
+            return scan_result
         
-        logger.info("Waiting for scan to complete (status=Ready)")
-        execution = self.asoc.getScanStatus(scanId)
-        status = execution["Status"] if execution else "Abort"
-
-        start = time.time()
-        while(status not in ["Ready", "Abort"]):
-            if(time.time()-start >= 120):
-                logger.info(f"\tScan still running...(status={status})")
-                start = time.time()
-            time.sleep(15)
-            execution = self.asoc.getScanStatus(scanId)
-            status = execution["Status"] if execution else "Abort"
+        #Wait for all scans in parallel
+        self.lastExecutions = {}
+        scans_to_wait = []
+        if 'sast_scan_id' in scan_result:
+            scans_to_wait.append(('SAST', scan_result['sast_scan_id']))
+        if 'sca_scan_id' in scan_result:
+            scans_to_wait.append(('SCA', scan_result['sca_scan_id']))
         
-        if(status == "Ready"):
-            logger.info(f"Scan [{scanId}] Complete")
-            # Store the execution data for use in getScanSummary
-            self.lastExecution = execution
-        else:
-            logger.error("ASoC returned an invalid status... check login?")
-            logger.error("If script continues, the scan might not be complete")
-            self.lastExecution = None
-        return scanId
+        with ThreadPoolExecutor(max_workers=len(scans_to_wait)) as executor:
+            futures = {
+                executor.submit(self._waitForScan, scan_id, label): (label, scan_id)
+                for label, scan_id in scans_to_wait
+            }
+            for future in as_completed(futures):
+                label, scan_id = futures[future]
+                try:
+                    _, execution = future.result()
+                    self.lastExecutions[scan_id] = execution
+                except Exception as e:
+                    logger.error(f"Error waiting for {label} scan: {e}")
+                    self.lastExecutions[scan_id] = None
+        
+        return scan_result
     
     #Download a report based on a scan
     def getReport(self, scanId, reportPath, note=""):
@@ -542,8 +758,8 @@ class AppScanOnCloudSAST(Pipe):
 					"Advisories": True,
 					"FixRecommendation": True,
 					"MinimizeDetails": True,
-					"ReportFileType": "Html",
-					"Title": "HCL ASoC SAST Security Report",
+					"ReportFileType": DEFAULT_REPORT_FILE_TYPE,
+					"Title": DEFAULT_REPORT_TITLE,
                     "Notes": note
 				}
         }
@@ -553,13 +769,13 @@ class AppScanOnCloudSAST(Pipe):
             return None
         
         statusMsg = self.asoc.reportStatus(reportId)
-        while(statusMsg["Items"][0].get("Status") not in ["Ready", "Abort"]):
-            time.sleep(5)
+        while(statusMsg["Items"][0].get("Status") not in [SCAN_STATUS_READY, SCAN_STATUS_ABORT]):
+            time.sleep(REPORT_POLL_INTERVAL_SECS)
             statusMsg = self.asoc.reportStatus(reportId)
             percent = statusMsg["Items"][0].get("Progress")
             logger.info(f"Report Progress: {percent}%")
         
-        if(statusMsg["Items"][0].get("Status") != "Ready"):
+        if(statusMsg["Items"][0].get("Status") != SCAN_STATUS_READY):
             logger.error("Problem generating report")
             return None
         logger.info("Report Complete, downloading report")
@@ -576,7 +792,8 @@ class AppScanOnCloudSAST(Pipe):
         an additional API call.
         """
         # Use the execution data stored during scan status polling
-        execution = getattr(self, 'lastExecution', None)
+        executions = getattr(self, 'lastExecutions', {})
+        execution = executions.get(scanId)
         if execution is None:
             logger.error("No execution data available from scan status")
             return None
@@ -609,7 +826,7 @@ class AppScanOnCloudSAST(Pipe):
     #Get current system timestamp
     def getTimeStamp(self):
         ts = time.time()
-        return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d_%H-%M-%S')
+        return datetime.datetime.fromtimestamp(ts).strftime(TIMESTAMP_FORMAT)
     
         
 if __name__ == '__main__':

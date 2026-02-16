@@ -1,4 +1,21 @@
+#
+# Copyright 2026 HCL America, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 import requests
+from linux.pipe.constants import CLIENT_TYPE_FORMAT, VERSION
 import urllib3
 import time
 import subprocess
@@ -7,6 +24,18 @@ import io
 import sys
 import os
 import json
+from constants import (
+    DATACENTER_EU, DATACENTER_NA, DATACENTER_URL_ASOC_EU, DATACENTER_URL_ASOC_US,
+    API_LOGIN, API_LOGOUT, API_TENANT_INFO, API_FILE_UPLOAD,
+    API_SAST_SCAN, API_SCA_SCAN, API_SCAN_EXECUTIONS, API_APPS,
+    API_SAST_EXECUTION, API_SCA_EXECUTION,
+    API_REPORT_SECURITY_SCAN, API_REPORTS_FILTER, API_REPORT_DOWNLOAD,
+    CONTENT_TYPE_JSON, CONTENT_TYPE_OCTET_STREAM,
+    SCAN_STATUS_READY, SCAN_STATUS_ABORT,
+    REPORT_WAIT_INTERVAL_SECS, REPORT_WAIT_TIMEOUT_SECS,
+    MSG_ERROR_SUBMITTING_SCAN, MSG_ASOC_REPORT_STATUS, MSG_ASOC_APP_SUMMARY_ERROR,
+    TIMESTAMP_FORMAT,
+)
 
 # Disable SSL warnings when bypassing certificate verification
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -16,10 +45,10 @@ class ASoC:
         self.apikey = apikey
         self.token = ""
         self.allow_untrusted = allow_untrusted
-        if datacenter == "EU":
-            self.base_url = "https://eu.cloud.appscan.com"
-        elif datacenter == "NA":
-            self.base_url = "https://cloud.appscan.com"
+        if datacenter == DATACENTER_EU:
+            self.base_url = DATACENTER_URL_ASOC_EU
+        elif datacenter == DATACENTER_NA:
+            self.base_url = DATACENTER_URL_ASOC_US
         else:
             self.base_url = datacenter
     
@@ -28,9 +57,9 @@ class ASoC:
     
     def login(self):
         if self.allow_untrusted:
-            resp = requests.post(f"{self.base_url}/api/v4/Account/ApiKeyLogin", json=self.apikey, verify=False)
+            resp = requests.post(f"{self.base_url}{API_LOGIN}", json=self.apikey, verify=False)
         else:
-            resp = requests.post(f"{self.base_url}/api/v4/Account/ApiKeyLogin", json=self.apikey)
+            resp = requests.post(f"{self.base_url}{API_LOGIN}", json=self.apikey)
         if(resp.status_code == 200):
             jsonObj = resp.json()
             self.token = jsonObj["Token"]
@@ -40,13 +69,13 @@ class ASoC:
         
     def logout(self):
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.get(f"{self.base_url}/api/v4/Account/Logout", headers=headers, verify=False)
+            resp = requests.get(f"{self.base_url}{API_LOGOUT}", headers=headers, verify=False)
         else:
-            resp = requests.get(f"{self.base_url}/api/v4/Account/Logout", headers=headers)
+            resp = requests.get(f"{self.base_url}{API_LOGOUT}", headers=headers)
         if(resp.status_code == 200):
             self.token = ""
             return True
@@ -55,13 +84,13 @@ class ASoC:
         
     def checkAuth(self):
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.get(f"{self.base_url}/api/v4/Account/TenantInfo", headers=headers, verify=False)
+            resp = requests.get(f"{self.base_url}{API_TENANT_INFO}", headers=headers, verify=False)
         else:
-            resp = requests.get(f"{self.base_url}/api/v4/Account/TenantInfo", headers=headers)
+            resp = requests.get(f"{self.base_url}{API_TENANT_INFO}", headers=headers)
         return resp.status_code == 200
     
     def generateIRX(self, scanName, scan_flag, appscanBin, stdoutFilePath = "", configFile=None, secret_scanning=None, printio=True, scan_speed=""):
@@ -105,17 +134,17 @@ class ASoC:
         #files = {'name': (<filename>, <file object>, <content type>, <per-part headers>)}
         fileName = os.path.basename(filePath)
         files = {
-            "uploadedFile": (fileName, open(filePath, 'rb'), 'application/octet-stream'),
+            "uploadedFile": (fileName, open(filePath, 'rb'), CONTENT_TYPE_OCTET_STREAM),
             "fileName": (None, fileName)
         }
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.post(f"{self.base_url}/api/v4/FileUpload", headers=headers, files=files, verify=False)
+            resp = requests.post(f"{self.base_url}{API_FILE_UPLOAD}", headers=headers, files=files, verify=False)
         else:
-            resp = requests.post(f"{self.base_url}/api/v4/FileUpload", headers=headers, files=files)
+            resp = requests.post(f"{self.base_url}{API_FILE_UPLOAD}", headers=headers, files=files)
         if(resp.status_code == 200):
             fileId = resp.json()["FileId"]
             return fileId
@@ -127,22 +156,23 @@ class ASoC:
             "AppId": appId,
             "Comment": comment,
             "ApplicationFileId": irxFileId,
-            "Personal": personal
+            "Personal": personal,
+            "ClientType": self.getClientType(self)
         }
         headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Content-Type": CONTENT_TYPE_JSON,
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.post(f"{self.base_url}/api/v4/Scans/Sast/", headers=headers, json=data, verify=False)
+            resp = requests.post(f"{self.base_url}{API_SAST_SCAN}", headers=headers, json=data, verify=False)
         else:
-            resp = requests.post(f"{self.base_url}/api/v4/Scans/Sast/", headers=headers, json=data)
+            resp = requests.post(f"{self.base_url}{API_SAST_SCAN}", headers=headers, json=data)
         if(resp.status_code == 201):
             scanId = resp.json()["Id"]
             return scanId
         else:
-            print(f"Error submitting scan")
+            print(MSG_ERROR_SUBMITTING_SCAN)
             print(resp.json())
             return None
 
@@ -152,22 +182,23 @@ class ASoC:
             "AppId": appId,
             "Comment": comment,
             "ApplicationFileId": irxFileId,
-            "Personal": personal
+            "Personal": personal,
+            "ClientType": self.getClientType(self)
         }
         headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Content-Type": CONTENT_TYPE_JSON,
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.post(f"{self.base_url}/api/v4/Scans/Sca/", headers=headers, json=data, verify=False)
+            resp = requests.post(f"{self.base_url}{API_SCA_SCAN}", headers=headers, json=data, verify=False)
         else:
-            resp = requests.post(f"{self.base_url}/api/v4/Scans/Sca/", headers=headers, json=data)
+            resp = requests.post(f"{self.base_url}{API_SCA_SCAN}", headers=headers, json=data)
         if(resp.status_code == 201):
             scanId = resp.json()["Id"]
             return scanId
         else:
-            print(f"Error submitting scan")
+            print(MSG_ERROR_SUBMITTING_SCAN)
             print(resp.json())
             return None
     
@@ -181,10 +212,10 @@ class ASoC:
         Returns None on error.
         """
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
-        url = f"{self.base_url}/api/v4/Scans/{scanId}/Executions?%24top=1&%24count=false"
+        url = f"{self.base_url}{API_SCAN_EXECUTIONS.format(scan_id=scanId)}"
         if self.allow_untrusted:
             resp = requests.get(url, headers=headers, verify=False)
         else:
@@ -195,24 +226,24 @@ class ASoC:
                 return executions[0]
             return None
         else:
-            print(f"ASoC Report Status")
+            print(MSG_ASOC_REPORT_STATUS)
             print(resp)
             return None
             
     def getApplication(self, id):
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.get(f"{self.base_url}/api/v4/Apps/", headers=headers, verify=False)
+            resp = requests.get(f"{self.base_url}{API_APPS}", headers=headers, verify=False)
         else:
-            resp = requests.get(f"{self.base_url}/api/v4/Apps/", headers=headers)
+            resp = requests.get(f"{self.base_url}{API_APPS}", headers=headers)
         if(resp.status_code == 200):
             app_info = self.checkAppExists(resp.json(), id)
             return app_info
         else:
-            print(f"ASoC App Summary Error Response")
+            print(MSG_ASOC_APP_SUMMARY_ERROR)
             return None
 
     def checkAppExists(self, response, id):
@@ -223,12 +254,12 @@ class ASoC:
 
     def SastScanSummary(self, id, is_execution=False):
         if(is_execution):
-            asoc_url = f"{self.base_url}/api/v4/Scans/SastExecution/"
+            asoc_url = f"{self.base_url}{API_SAST_EXECUTION}"
         else:
-            asoc_url = f"{self.base_url}/api/v4/Scans/Sast/"
+            asoc_url = f"{self.base_url}{API_SAST_SCAN}"
         
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         
@@ -246,12 +277,12 @@ class ASoC:
         
     def ScaScanSummary(self, id, is_execution=False):
         if(is_execution):
-            asoc_url = f"{self.base_url}/api/v4/Scans/ScaExecution/"
+            asoc_url = f"{self.base_url}{API_SCA_EXECUTION}"
         else:
-            asoc_url = f"{self.base_url}/api/v4/Scans/Sca/"
+            asoc_url = f"{self.base_url}{API_SCA_SCAN}"
         
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         
@@ -268,9 +299,9 @@ class ASoC:
             return None
         
     def startReport(self, id, reportConfig):
-        url = f"{self.base_url}/api/v4/Reports/Security/Scan/"+id
+        url = f"{self.base_url}{API_REPORT_SECURITY_SCAN}"+id
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
@@ -284,36 +315,36 @@ class ASoC:
         
     def reportStatus(self, reportId):
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.get(f"{self.base_url}/api/v4/Reports?filter=Id%20eq%20"+reportId, headers=headers, verify=False)
+            resp = requests.get(f"{self.base_url}{API_REPORTS_FILTER}"+reportId, headers=headers, verify=False)
         else:
-            resp = requests.get(f"{self.base_url}/api/v4/Reports?filter=Id%20eq%20"+reportId, headers=headers)
+            resp = requests.get(f"{self.base_url}{API_REPORTS_FILTER}"+reportId, headers=headers)
         if(resp.status_code == 200):
             return resp.json()
         else:
-            return {"Status": "Abort", "Progress": 0}
+            return {"Status": SCAN_STATUS_ABORT, "Progress": 0}
             
-    def waitForReport(self, reportId, intervalSecs=3, timeoutSecs=60):
+    def waitForReport(self, reportId, intervalSecs=REPORT_WAIT_INTERVAL_SECS, timeoutSecs=REPORT_WAIT_TIMEOUT_SECS):
         status = None
         elapsed = 0
-        while status not in ["Abort","Ready"] or elapsed >= timeoutSecs:
+        while status not in [SCAN_STATUS_ABORT, SCAN_STATUS_READY] or elapsed >= timeoutSecs:
             status = self.reportStatus(reportId)
             elapsed += intervalSecs
             time.sleep(intervalSecs)   
-        return status == "Ready"
+        return status == SCAN_STATUS_READY
         
     def downloadReport(self, reportId, fullPath):
         headers = {
-            "Accept": "application/json",
+            "Accept": CONTENT_TYPE_JSON,
             "Authorization": "Bearer "+self.token
         }
         if self.allow_untrusted:
-            resp = requests.get(f"{self.base_url}/api/v4/Reports/"+reportId+"/Download", headers=headers, verify=False)
+            resp = requests.get(f"{self.base_url}{API_REPORT_DOWNLOAD.format(report_id=reportId)}", headers=headers, verify=False)
         else:
-            resp = requests.get(f"{self.base_url}/api/v4/Reports/"+reportId+"/Download", headers=headers)
+            resp = requests.get(f"{self.base_url}{API_REPORT_DOWNLOAD.format(report_id=reportId)}", headers=headers)
         if(resp.status_code==200):
             report_bytes = resp.content
             with open(fullPath, "wb") as f:
@@ -325,4 +356,8 @@ class ASoC:
     #Get current system timestamp
     def getTimeStamp(self):
         ts = time.time()
-        return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d_%H-%M-%S')
+        return datetime.datetime.fromtimestamp(ts).strftime(TIMESTAMP_FORMAT)
+
+    def getClientType(self):
+        os = sys.platform.system().lower()
+        return CLIENT_TYPE_FORMAT.replace("<os>", os).replace("<version>", VERSION)
