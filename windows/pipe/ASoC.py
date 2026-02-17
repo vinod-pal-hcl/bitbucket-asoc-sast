@@ -152,7 +152,6 @@ class ASoC:
         return None
     
     def createSastScan(self, scanName, appId, irxFileId, comment="", personal=False):
-        self.logger.info(f"Client Type for scan: {self.getClientType()}")
         data = {
             "ScanName": scanName,
             "AppId": appId,
@@ -179,7 +178,6 @@ class ASoC:
             return None
 
     def createScaScan(self, scanName, appId, irxFileId, comment="", personal=False):
-        self.logger.info(f"Client Type for scan: {self.getClientType()}")
         data = {
             "ScanName": scanName,
             "AppId": appId,

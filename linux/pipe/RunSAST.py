@@ -34,7 +34,7 @@ from constants import (
     CONTENT_TYPE_ZIP,
     SCAN_FLAG_SAO, SCAN_FLAG_OSO,
     SCAN_STATUS_READY, SCAN_STATUS_ABORT,
-    SCAN_POLL_INTERVAL_SECS, SCAN_LOG_INTERVAL_SECS,
+    SCAN_POLL_INTERVAL_SECS, SCAN_LOG_INTERVAL_SECS, SCAN_MAX_WAIT_SECS,
     REPORT_POLL_INTERVAL_SECS, DOWNLOAD_LOG_INTERVAL_SECS,
     DOWNLOAD_CHUNK_SIZE, BYTES_PER_MB, FILE_PERMISSION_MODE, SECONDS_PER_DAY,
     SACLIENT_DIR, TARGET_DIR, REPORTS_DIR,
@@ -636,21 +636,26 @@ class AppScanOnCloudSAST(Pipe):
     #If Wait=True the function will sleep until the scan(s) are complete
     def _waitForScan(self, scanId, label=""):
         """Wait for a single scan to complete. Returns (scanId, execution)."""
-        logger.info(f"Waiting for {label} scan [{scanId}] to complete (status=Ready)")
+        logger.info(f"Waiting for {label} scan [{scanId}] to complete...")
         execution = self.asoc.getScanStatus(scanId)
         status = execution["Status"] if execution else SCAN_STATUS_ABORT
-        start = time.time()
+        progress = execution.get("Progress", "N/A") if execution else "N/A"
+        scan_start = time.time()
         while(status not in [SCAN_STATUS_READY, SCAN_STATUS_ABORT]):
-            if(time.time()-start >= SCAN_LOG_INTERVAL_SECS):
-                logger.info(f"\t{label} scan still running...(status={status})")
-                start = time.time()
+            elapsed = time.time() - scan_start
+            if elapsed >= SCAN_MAX_WAIT_SECS:
+                logger.error(f"{label} scan [{scanId}] timed out after {SCAN_MAX_WAIT_SECS}s")
+                execution = None
+                break
             time.sleep(SCAN_POLL_INTERVAL_SECS)
             execution = self.asoc.getScanStatus(scanId)
             status = execution["Status"] if execution else SCAN_STATUS_ABORT
+            progress = execution.get("Progress", "N/A") if execution else "N/A"
+            logger.info(f"\t{label} scan [{scanId}] status={status}, progress={progress}")
         
         if(status == SCAN_STATUS_READY):
             logger.info(f"{label} Scan [{scanId}] Complete")
-        else:
+        elif execution is not None:
             logger.error(f"{label} scan returned invalid status... check login?")
             logger.error("If script continues, the scan might not be complete")
             execution = None
