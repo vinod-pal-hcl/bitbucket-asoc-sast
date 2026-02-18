@@ -48,6 +48,7 @@ API_SCA_EXECUTION = "/api/v4/Scans/ScaExecution/"
 API_REPORT_SECURITY_SCAN = "/api/v4/Reports/Security/Scan/"
 API_REPORTS_FILTER = "/api/v4/Reports?filter=Id%20eq%20"
 API_REPORT_DOWNLOAD = "/api/v4/Reports/{report_id}/Download"
+API_SCAN_ISSUES = "/api/v4/Issues/Scan/{scan_id}?applyPolicies=None&%24top={top}&%24count=false"
 
 # =============================================================================
 # Platform-Specific: SAClient Configuration
@@ -128,6 +129,26 @@ MSG_SCAN_COMMENT = "This scan was created via BitBucket Pipeline"
 MSG_ERROR_SUBMITTING_SCAN = "Error submitting scan"
 MSG_ASOC_REPORT_STATUS = "ASoC Report Status"
 MSG_ASOC_APP_SUMMARY_ERROR = "ASoC App Summary Error Response"
+
+# =============================================================================
+# Code Insights Configuration
+# =============================================================================
+CODE_INSIGHTS_REPORT_ID = "asoc-sast-security-report"
+CODE_INSIGHTS_REPORT_TITLE = "HCL ASoC Security Scan"
+CODE_INSIGHTS_REPORTER = "HCL AppScan on Cloud"
+CODE_INSIGHTS_LOGO_URL = "https://help.hcltechsw.com/favicon.ico"
+CODE_INSIGHTS_MAX_ANNOTATIONS = 1000
+CODE_INSIGHTS_ANNOTATION_TYPE = "VULNERABILITY"
+CODE_INSIGHTS_REPORT_TYPE = "SECURITY"
+
+# Mapping from ASoC severity strings to Bitbucket Code Insights severity
+SEVERITY_MAP_ASOC_TO_BB = {
+    "Critical": "CRITICAL",
+    "High": "HIGH",
+    "Medium": "MEDIUM",
+    "Low": "LOW",
+    "Informational": "LOW",
+}
 
 # =============================================================================
 # Timestamp Format

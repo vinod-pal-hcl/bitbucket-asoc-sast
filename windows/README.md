@@ -3,7 +3,7 @@ This is a Windows docker image that uses python to download the SAClientUtil fro
 
 ### Variables
 
-The pipe has 16 variables.
+The pipe has 20 variables.
 
 | Variable |  Required | Description |
 |---|---|---|
@@ -23,6 +23,10 @@ The pipe has 16 variables.
 | ALLOW_UNTRUSTED | Optional | If true, disables SSL certificate verification for HTTPS requests. Default: false (SSL verification enabled) |
 | SCAN_SPEED | Optional | Scan depth/speed: "simple" (quick checks), "balanced" (CI/CD), "deep" (default, thorough analysis), "thorough" (most comprehensive). Default: None (uses AppScan default) |
 | PERSONAL_SCAN | Optional | If true, creates a personal scan in AppScan on Cloud. Default: false |
+| WAIT_FOR_ANALYSIS | Optional | If true, waits for the scan to complete before finishing. Default: true |
+| FAIL_FOR_NONCOMPLIANCE | Optional | If true, fails the pipeline when issues are found at or above the severity threshold. Default: false |
+| FAILURE_THRESHOLD | Optional | Severity threshold for non-compliance check: "Critical", "High", "Medium", "Low" (default), or "Informational". |
+| CODE_INSIGHTS | Optional | If true, publishes scan results to Bitbucket Code Insights with a summary report and per-issue annotations on the commit. Requires `oidc: true` in the pipeline step. Default: false |
 
 **Note:** Providing a config file can override other settings like `TARGET_DIR` or `SECRET_SCANNING`.
 
@@ -52,8 +56,7 @@ pipelines:
         after-script:
           - pipe: atlassian/checkstyle-report:0.2.0
     - step:
-        name: ASoC SAST Scan
-        script:
+        name: ASoC SAST Scan        oidc: true  # Required for CODE_INSIGHTS feature        script:
           # Custom Pipe to run Static Analysis via HCL AppScan on Cloud
           # View README: https://github.com/cwtravis/bitbucket-asoc-sast-linux
           - pipe: docker://cwtravis1/bitbucket_asoc_sast:windows
@@ -68,6 +71,7 @@ pipelines:
               BUILD_NUM: $BITBUCKET_BUILD_NUMBER
               SCAN_NAME: "HCL_ASoC_SAST"
               DEBUG: "false"
+              CODE_INSIGHTS: "true"
         artifacts:
           - reports/*
 ```

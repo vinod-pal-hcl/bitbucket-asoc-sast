@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-from bitbucket_pipes_toolkit import Pipe, get_logger
+from bitbucket_pipes_toolkit import Pipe, get_logger, CodeInsights
 from ASoC import ASoC
 import requests
 import urllib3
@@ -26,6 +26,7 @@ import zipfile
 import re
 import datetime
 import shutil
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from constants import (
     VERSION,
@@ -43,6 +44,10 @@ from constants import (
     MSG_PIPE_NAME, MSG_PIPELINE_ERROR, MSG_PIPELINE_SUCCESS,
     MSG_BOTH_OSO_SAO, MSG_SCAN_COMMENT,
     TIMESTAMP_FORMAT,
+    CODE_INSIGHTS_REPORT_ID, CODE_INSIGHTS_REPORT_TITLE, CODE_INSIGHTS_REPORTER,
+    CODE_INSIGHTS_LOGO_URL, CODE_INSIGHTS_MAX_ANNOTATIONS,
+    CODE_INSIGHTS_ANNOTATION_TYPE, CODE_INSIGHTS_REPORT_TYPE,
+    SEVERITY_MAP_ASOC_TO_BB,
 )
 
 # Disable SSL warnings when bypassing certificate verification
@@ -69,7 +74,8 @@ schema = {
     'PERSONAL_SCAN': {'type': 'boolean', 'required': False, 'default': False},
     'WAIT_FOR_ANALYSIS': {'type': 'boolean', 'required': False, 'default': True},
     'FAIL_FOR_NONCOMPLIANCE': {'type': 'boolean', 'required': False, 'default': False},
-    'FAILURE_THRESHOLD': {'type': 'string', 'required': False, 'default': 'Low'}
+    'FAILURE_THRESHOLD': {'type': 'string', 'required': False, 'default': 'Low'},
+    'CODE_INSIGHTS': {'type': 'boolean', 'required': False, 'default': False},
 }
 
 class AppScanOnCloudSAST(Pipe):
@@ -95,12 +101,13 @@ class AppScanOnCloudSAST(Pipe):
         self.wait_for_analysis = self.get_variable('WAIT_FOR_ANALYSIS')
         self.fail_for_noncompliance = self.get_variable('FAIL_FOR_NONCOMPLIANCE')
         self.failure_threshold = self.get_variable('FAILURE_THRESHOLD')
-        self.repo = env.get('BITBUCKET_REPO_SLUG', "")
-        self.repo_full_name = env.get('BITBUCKET_REPO_FULL_NAME', "")
-        branch = env.get('BITBUCKET_BRANCH', "")
-        self.commit = env.get('BITBUCKET_COMMIT', "")
-        projectKey = env.get('BITBUCKET_PROJECT_KEY', "")
-        self.repoOwner = env.get('BITBUCKET_REPO_OWNER', "")
+        self.code_insights_enabled = self.get_variable('CODE_INSIGHTS')
+        self.repo = env.get('BITBUCKET_REPO_SLUG', "") or env.get('REPO_SLUG', "")
+        self.repo_full_name = env.get('BITBUCKET_REPO_FULL_NAME', "") or env.get('REPO', "")
+        branch = env.get('BITBUCKET_BRANCH', "") or env.get('BRANCH', "")
+        self.commit = env.get('BITBUCKET_COMMIT', "") or env.get('COMMIT', "")
+        projectKey = env.get('BITBUCKET_PROJECT_KEY', "") or env.get('PROJECT_KEY', "")
+        self.repoOwner = env.get('BITBUCKET_REPO_OWNER', "") or env.get('REPO_OWNER', "")
         self.cwd = os.getcwd()
 
         if(self.static_analysis_only and self.open_source_only):
@@ -157,6 +164,7 @@ class AppScanOnCloudSAST(Pipe):
         logger.info(f"SECRET_SCANNING: {self.secret_scanning}")
         logger.info(f"SCAN_SPEED: {self.scan_speed}")
         logger.info(f"DEBUG: {self.debug}")
+        logger.info(f"CODE_INSIGHTS: {self.code_insights_enabled}")
         logger.debug(f"REPO: {self.repo}")
         logger.debug(f"REPO_FULL: {self.repo_full_name}")
         logger.debug(f"BRANCH: {branch}")
@@ -333,7 +341,384 @@ class AppScanOnCloudSAST(Pipe):
                 logger.info(f"No issues found at or above '{self.failure_threshold}' severity threshold")
                 logger.info("========== Step 6: Complete =======================\n")
         
+        # Step 7: Code Insights (if enabled)
+        if self.code_insights_enabled:
+            logger.info("========== Step 7: Bitbucket Code Insights ========")
+            try:
+                self.publishCodeInsights(combined_summary, scan_result)
+                logger.info("========== Step 7: Complete =======================\n")
+            except Exception as e:
+                logger.error(f"Code Insights failed: {e}")
+                logger.warning("Continuing despite Code Insights failure - scan results are still valid")
+                logger.info("========== Step 7: FAILED (non-blocking) ==========\n")
+        
         self.success(message=MSG_PIPELINE_SUCCESS)
+
+    def publishCodeInsights(self, combined_summary, scan_result):
+        """
+        Publish scan results to Bitbucket Code Insights, including a
+        summary report and per-issue annotations.
+        
+        Args:
+            combined_summary: Aggregated scan summary dict with issue counts.
+            scan_result: Dict with 'sast_scan_id' and/or 'sca_scan_id' keys.
+        """
+        logger.info("[CODE INSIGHTS] Starting publishCodeInsights function")
+        logger.info(f"[CODE INSIGHTS] Input parameters - combined_summary: {combined_summary}")
+        logger.info(f"[CODE INSIGHTS] Input parameters - scan_result: {scan_result}")
+        
+        logger.info(f"[CODE INSIGHTS] Validating commit: {self.commit}")
+        if not self.commit:
+            logger.warning("[CODE INSIGHTS] VALIDATION FAILED: No BITBUCKET_COMMIT available - skipping Code Insights")
+            return
+        logger.info(f"[CODE INSIGHTS] Commit validated successfully: {self.commit}")
+        
+        logger.info(f"[CODE INSIGHTS] Validating repo owner: {self.repoOwner}, repo: {self.repo}")
+        if not self.repoOwner or not self.repo:
+            logger.warning(f"[CODE INSIGHTS] VALIDATION FAILED: No BITBUCKET_REPO_OWNER ({self.repoOwner}) or BITBUCKET_REPO_SLUG ({self.repo}) available - skipping Code Insights")
+            return
+        logger.info(f"[CODE INSIGHTS] Repo info validated successfully - Owner: {self.repoOwner}, Repo: {self.repo}")
+        
+        logger.info("[CODE INSIGHTS] Initializing CodeInsights object with OIDC auth")
+        try:
+            code_insights = CodeInsights(
+                repo=self.repo,
+                username=self.repoOwner,
+                auth_type="oidc",
+            )
+            logger.info("[CODE INSIGHTS] CodeInsights object initialized successfully")
+        except Exception as e:
+            logger.error(f"[CODE INSIGHTS] FAILED to initialize CodeInsights object: {e}")
+            raise
+        
+        # Step 7a: Create the Code Insights report
+        logger.info("[CODE INSIGHTS] ========== Step 7a: Creating Code Insights Report ==========")
+        try:
+            report_uuid = self._createCodeInsightsReport(code_insights, combined_summary, scan_result)
+            logger.info(f"[CODE INSIGHTS] Step 7a completed successfully. Report UUID: {report_uuid}")
+        except Exception as e:
+            logger.error(f"[CODE INSIGHTS] Step 7a FAILED: {e}")
+            raise
+        
+        # Step 7b: Create annotations from scan issues
+        logger.info("[CODE INSIGHTS] ========== Step 7b: Creating Code Insights Annotations ==========")
+        try:
+            self._createCodeInsightsAnnotations(code_insights, scan_result, report_uuid)
+            logger.info("[CODE INSIGHTS] Step 7b completed successfully")
+        except Exception as e:
+            logger.error(f"[CODE INSIGHTS] Step 7b FAILED: {e}")
+            raise
+        
+        logger.info("[CODE INSIGHTS] publishCodeInsights completed successfully")
+    
+    def _createCodeInsightsReport(self, code_insights, summary, scan_result):
+        """
+        Create a Code Insights report with scan summary data attached to the commit.
+        
+        Args:
+            code_insights: CodeInsights instance.
+            summary: Scan summary dict with issue counts.
+            scan_result: Dict with scan IDs.
+        
+        Returns:
+            str: The report UUID assigned by Bitbucket, or CODE_INSIGHTS_REPORT_ID as fallback.
+        """
+        logger.info("[CODE INSIGHTS REPORT] Starting _createCodeInsightsReport")
+        logger.debug(f"[CODE INSIGHTS REPORT] Summary input: {json.dumps(summary, indent=2) if summary else 'None'}")
+        logger.debug(f"[CODE INSIGHTS REPORT] Scan result input: {json.dumps(scan_result, indent=2)}")
+        
+        total_issues = summary.get('total_issues', 0) if summary else 0
+        logger.info(f"[CODE INSIGHTS REPORT] Total issues extracted: {total_issues}")
+        
+        # Determine result based on compliance check settings
+        logger.info(f"[CODE INSIGHTS REPORT] Determining report result - fail_for_noncompliance: {self.fail_for_noncompliance}, failure_threshold: {self.failure_threshold}")
+        if self.fail_for_noncompliance and summary:
+            issues_at_threshold = self.getIssuesAtOrAboveThreshold(summary, self.failure_threshold)
+            report_result = "FAILED" if issues_at_threshold > 0 else "PASSED"
+            logger.info(f"[CODE INSIGHTS REPORT] Compliance mode: Issues at/above threshold: {issues_at_threshold}, Result: {report_result}")
+        else:
+            report_result = "PASSED" if total_issues == 0 else "FAILED"
+            logger.info(f"[CODE INSIGHTS REPORT] Standard mode: Result: {report_result}")
+        
+        # Build the scan URL for linking
+        logger.info("[CODE INSIGHTS REPORT] Building scan URL")
+        sast_scan_id = scan_result.get('sast_scan_id')
+        sca_scan_id = scan_result.get('sca_scan_id')
+        logger.info(f"[CODE INSIGHTS REPORT] Scan IDs - SAST: {sast_scan_id}, SCA: {sca_scan_id}")
+        primary_scan_id = sast_scan_id or sca_scan_id
+        scan_link = f"{self.asoc.getDataCenterURL()}/main/myapps/{self.appID}/scans/{primary_scan_id}" if primary_scan_id else self.asoc.getDataCenterURL()
+        logger.info(f"[CODE INSIGHTS REPORT] Scan link generated: {scan_link}")
+        
+        # Build report data items
+        logger.info("[CODE INSIGHTS REPORT] Building report data items")
+        data_items = []
+        if summary:
+            data_items = [
+                {"title": "Total Issues", "type": "NUMBER", "value": summary.get('total_issues', 0)},
+                {"title": "Critical Issues", "type": "NUMBER", "value": summary.get('critical_issues', 0)},
+                {"title": "High Issues", "type": "NUMBER", "value": summary.get('high_issues', 0)},
+                {"title": "Medium Issues", "type": "NUMBER", "value": summary.get('medium_issues', 0)},
+                {"title": "Low Issues", "type": "NUMBER", "value": summary.get('low_issues', 0)},
+                {"title": "Informational Issues", "type": "NUMBER", "value": summary.get('info_issues', 0)},
+            ]
+            logger.info(f"[CODE INSIGHTS REPORT] Added issue count data items")
+            # Add duration if available
+            duration = summary.get('duration_seconds', 0)
+            if duration:
+                minutes = duration // 60
+                data_items.append({"title": "Scan Duration (min)", "type": "NUMBER", "value": minutes})
+                logger.info(f"[CODE INSIGHTS REPORT] Added scan duration: {minutes} minutes")
+            # Add scan type info
+            scan_types = []
+            if sast_scan_id:
+                scan_types.append("SAST")
+            if sca_scan_id:
+                scan_types.append("SCA")
+            if scan_types:
+                data_items.append({"title": "Scan Types", "type": "TEXT", "value": " + ".join(scan_types)})
+                logger.info(f"[CODE INSIGHTS REPORT] Added scan types: {' + '.join(scan_types)}")
+        logger.info(f"[CODE INSIGHTS REPORT] Total data items created: {len(data_items)}")
+        
+        # Build the details string
+        logger.info("[CODE INSIGHTS REPORT] Building details string")
+        details_parts = []
+        if summary:
+            details_parts.append(f"Found {total_issues} issue(s)")
+            if self.fail_for_noncompliance:
+                details_parts.append(f"Threshold: {self.failure_threshold}")
+        details = " | ".join(details_parts) if details_parts else "Security scan completed"
+        logger.info(f"[CODE INSIGHTS REPORT] Details: {details}")
+        
+        # Generate a deterministic UUID from the external_id for consistent report identification
+        logger.info(f"[CODE INSIGHTS REPORT] Generating report UUID from external_id: {CODE_INSIGHTS_REPORT_ID}")
+        report_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, CODE_INSIGHTS_REPORT_ID))
+        logger.info(f"[CODE INSIGHTS REPORT] Generated report UUID: {report_uuid}")
+        
+        report_data = {
+            "title": CODE_INSIGHTS_REPORT_TITLE,
+            "details": details,
+            "report_type": CODE_INSIGHTS_REPORT_TYPE,
+            "reporter": CODE_INSIGHTS_REPORTER,
+            "result": report_result,
+            "uuid": report_uuid,
+            "external_id": CODE_INSIGHTS_REPORT_ID,
+            "logo_url": CODE_INSIGHTS_LOGO_URL,
+            "link": scan_link,
+            "data": data_items,
+        }
+        
+        logger.info("[CODE INSIGHTS REPORT] Final report data structure:")
+        logger.debug(f"[CODE INSIGHTS REPORT] {json.dumps(report_data, indent=2)}")
+        logger.info(f"[CODE INSIGHTS REPORT] Calling code_insights.create_report() for commit: {self.commit}")
+        
+        try:
+            result = code_insights.create_report(self.commit, report_data)
+            logger.info(f"[CODE INSIGHTS REPORT] Report created successfully (result={report_result})")
+            logger.debug(f"[CODE INSIGHTS REPORT] Report response: {json.dumps(result, indent=2) if result else 'None'}")
+            # Extract the Bitbucket-assigned UUID to use for annotations
+            report_uuid = result.get('uuid', CODE_INSIGHTS_REPORT_ID) if result else CODE_INSIGHTS_REPORT_ID
+            logger.info(f"[CODE INSIGHTS REPORT] Final report UUID from Bitbucket: {report_uuid}")
+            return report_uuid
+        except Exception as e:
+            logger.error(f"[CODE INSIGHTS REPORT] FAILED to create Code Insights report: {e}")
+            logger.error(f"[CODE INSIGHTS REPORT] Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"[CODE INSIGHTS REPORT] Full traceback: {traceback.format_exc()}")
+            raise
+    
+    def _createCodeInsightsAnnotations(self, code_insights, scan_result, report_id):
+        """
+        Create Code Insights annotations from individual scan issues.
+        Fetches issues from ASoC and maps them to file-level annotations.
+        
+        Args:
+            code_insights: CodeInsights instance.
+            scan_result: Dict with 'sast_scan_id' and/or 'sca_scan_id' keys.
+            report_id: The report UUID or external_id to attach annotations to.
+        """
+        logger.info("[CODE INSIGHTS ANNOTATIONS] Starting _createCodeInsightsAnnotations")
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Report ID: {report_id}")
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Scan result: {scan_result}")
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Max annotations limit: {CODE_INSIGHTS_MAX_ANNOTATIONS}")
+        
+        all_issues = []
+        for scan_type, scan_id in [('SAST', scan_result.get('sast_scan_id')),
+                                    ('SCA', scan_result.get('sca_scan_id'))]:
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] Processing {scan_type} scan - ID: {scan_id}")
+            if scan_id is None:
+                logger.info(f"[CODE INSIGHTS ANNOTATIONS] Skipping {scan_type} - no scan ID")
+                continue
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] Fetching {scan_type} issues from ASoC (limit: {CODE_INSIGHTS_MAX_ANNOTATIONS})...")
+            try:
+                issues = self.asoc.getScanIssues(scan_id, top=CODE_INSIGHTS_MAX_ANNOTATIONS)
+                logger.info(f"[CODE INSIGHTS ANNOTATIONS] Successfully retrieved {len(issues)} {scan_type} issues")
+                logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Sample of first issue: {json.dumps(issues[0], indent=2) if issues else 'No issues'}")
+            except Exception as e:
+                logger.error(f"[CODE INSIGHTS ANNOTATIONS] FAILED to fetch {scan_type} issues: {e}")
+                raise
+            
+            for issue in issues:
+                issue['_scan_type'] = scan_type
+                issue['_scan_id'] = scan_id
+            all_issues.extend(issues)
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] Added {len(issues)} {scan_type} issues to total")
+        
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Total issues collected from all scans: {len(all_issues)}")
+        
+        if not all_issues:
+            logger.info("[CODE INSIGHTS ANNOTATIONS] No issues to annotate - returning")
+            return
+        
+        # Limit total annotations to max allowed
+        if len(all_issues) > CODE_INSIGHTS_MAX_ANNOTATIONS:
+            logger.warning(f"[CODE INSIGHTS ANNOTATIONS] Truncating {len(all_issues)} issues to {CODE_INSIGHTS_MAX_ANNOTATIONS} annotations (Bitbucket limit)")
+            all_issues = all_issues[:CODE_INSIGHTS_MAX_ANNOTATIONS]
+        else:
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] Processing all {len(all_issues)} issues (within limit)")
+        
+        logger.info("[CODE INSIGHTS ANNOTATIONS] Building annotations from issues...")
+        annotations = []
+        annotations_skipped = 0
+        
+        for idx, issue in enumerate(all_issues):
+            logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Building annotation {idx + 1}/{len(all_issues)}")
+            try:
+                annotation = self._buildAnnotation(issue, idx)
+                if annotation is None:
+                    annotations_skipped += 1
+                    logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Annotation {idx} skipped (returned None)")
+                    continue
+                annotations.append(annotation)
+                logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Annotation {idx} built successfully")
+            except Exception as e:
+                logger.error(f"[CODE INSIGHTS ANNOTATIONS] Error building annotation {idx}: {e}")
+                annotations_skipped += 1
+        
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Built {len(annotations)} valid annotations, {annotations_skipped} skipped")
+        
+        if not annotations:
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] No valid annotations to create ({annotations_skipped} total skipped) - returning")
+            return
+        
+        logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Sample annotation data: {json.dumps(annotations[0], indent=2) if annotations else 'None'}")
+        
+        # Use bulk annotations API for efficiency and to avoid per-annotation lookup issues
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Attempting to create {len(annotations)} annotations via bulk API")
+        logger.info(f"[CODE INSIGHTS ANNOTATIONS] Calling create_bulk_annotations for commit: {self.commit}, report: {report_id}")
+        try:
+            code_insights.create_bulk_annotations(
+                self.commit,
+                report_id,
+                annotations
+            )
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] SUCCESS: {len(annotations)} annotations created via bulk API, {annotations_skipped} skipped")
+        except Exception as e:
+            logger.warning(f"[CODE INSIGHTS ANNOTATIONS] Bulk annotations FAILED: {e}")
+            logger.warning(f"[CODE INSIGHTS ANNOTATIONS] Exception type: {type(e).__name__}")
+            import traceback
+            logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Full traceback: {traceback.format_exc()}")
+            logger.info("[CODE INSIGHTS ANNOTATIONS] Falling back to individual annotation creation...")
+            annotations_created = 0
+            annotations_failed = 0
+            for idx, annotation in enumerate(annotations):
+                logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Creating individual annotation {idx + 1}/{len(annotations)}")
+                try:
+                    code_insights.create_annotation(
+                        self.commit,
+                        report_id,
+                        annotation
+                    )
+                    annotations_created += 1
+                    logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Individual annotation {idx} created successfully")
+                except Exception as ann_e:
+                    logger.debug(f"[CODE INSIGHTS ANNOTATIONS] Failed to create individual annotation {idx}: {ann_e}")
+                    annotations_failed += 1
+            logger.info(f"[CODE INSIGHTS ANNOTATIONS] Fallback complete: {annotations_created} created, {annotations_failed} failed, {annotations_skipped} skipped")
+    
+    def _buildAnnotation(self, issue, index):
+        """
+        Build a Code Insights annotation dict from an ASoC issue.
+        
+        Args:
+            issue: ASoC issue dictionary.
+            index: Index for unique external_id.
+        
+        Returns:
+            dict: Annotation data, or None if the issue cannot be mapped.
+        """
+        logger.debug(f"[BUILD ANNOTATION] Starting _buildAnnotation for issue index {index}")
+        logger.debug(f"[BUILD ANNOTATION] Issue data: {json.dumps(issue, indent=2)}")
+        
+        # Extract issue fields (ASoC issue structure)
+        issue_id = issue.get("Id", str(index))
+        severity = issue.get("Severity", "Informational")
+        issue_type = issue.get("IssueType", "Security Issue")
+        scan_type = issue.get("_scan_type", "")
+        scan_id = issue.get("_scan_id", "")
+        discovery_method = issue.get("DiscoveryMethod", scan_type)
+        logger.debug(f"[BUILD ANNOTATION] Extracted fields - ID: {issue_id}, Severity: {severity}, Type: {issue_type}, Scan: {scan_type}")
+        
+        # Location info
+        location = issue.get("Location", "")
+        source_file = issue.get("SourceFile", "")
+        line = issue.get("Line", None)
+        logger.debug(f"[BUILD ANNOTATION] Location info - File: {source_file}, Line: {line}, Location: {location}")
+        
+        # Build summary: prefer ApiVulnName > Source > IssueType
+        vuln_name = issue.get("ApiVulnName") or issue.get("Source") or issue_type
+        summary = f"[{discovery_method}] {vuln_name}"
+        logger.debug(f"[BUILD ANNOTATION] Built summary: {summary}")
+        
+        # Build details
+        details_parts = []
+        details_parts.append(f"Issue Type: {issue_type}")
+        if location:
+            details_parts.append(f"Location: {location}")
+        if issue.get("Context"):
+            details_parts.append(f"Context: {issue.get('Context')}")
+        if issue.get("Cwe"):
+            details_parts.append(f"CWE-{issue.get('Cwe')}")
+        cve = issue.get("Cve")
+        if cve and str(cve).strip():
+            details_parts.append(f"CVE: {cve}")
+        cvss = issue.get("Cvss")
+        if cvss is not None:
+            details_parts.append(f"CVSS: {cvss}")
+        if issue.get("Scanner"):
+            details_parts.append(f"Scanner: {issue.get('Scanner')}")
+        details = " | ".join(details_parts) if details_parts else summary
+        
+        # Map severity
+        bb_severity = SEVERITY_MAP_ASOC_TO_BB.get(severity, "LOW")
+        logger.debug(f"[BUILD ANNOTATION] Mapped severity: ASoC '{severity}' -> BB '{bb_severity}'")
+        
+        # Build link to issue in ASoC
+        link = f"{self.asoc.getDataCenterURL()}/main/myapps/{self.appID}/scans/{scan_id}/issues"
+        logger.debug(f"[BUILD ANNOTATION] Issue link: {link}")
+        
+        annotation = {
+            "external_id": f"asoc-{scan_type.lower()}-{issue_id}",
+            "annotation_type": CODE_INSIGHTS_ANNOTATION_TYPE,
+            "summary": summary[:450],  # Bitbucket limits summary length
+            "details": details[:2000],  # Bitbucket limits details length
+            "severity": bb_severity,
+            "result": "FAILED",
+            "link": link,
+        }
+        
+        # Add file path and line if available
+        if source_file:
+            annotation["path"] = source_file
+            logger.debug(f"[BUILD ANNOTATION] Added file path: {source_file}")
+        if line is not None:
+            try:
+                annotation["line"] = int(line)
+                logger.debug(f"[BUILD ANNOTATION] Added line number: {line}")
+            except (ValueError, TypeError):
+                logger.debug(f"[BUILD ANNOTATION] Could not parse line number: {line}")
+        
+        logger.debug(f"[BUILD ANNOTATION] Final annotation: {json.dumps(annotation, indent=2)}")
+        return annotation
 
     def _logScanSummary(self, label, summary):
         """Log a scan summary with a label."""

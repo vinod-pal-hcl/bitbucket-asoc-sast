@@ -30,6 +30,7 @@ from constants import (
     API_SAST_SCAN, API_SCA_SCAN, API_SCAN_EXECUTIONS, API_APPS,
     API_SAST_EXECUTION, API_SCA_EXECUTION,
     API_REPORT_SECURITY_SCAN, API_REPORTS_FILTER, API_REPORT_DOWNLOAD,
+    API_SCAN_ISSUES,
     CONTENT_TYPE_JSON, CONTENT_TYPE_OCTET_STREAM,
     SCAN_STATUS_READY, SCAN_STATUS_ABORT,
     REPORT_WAIT_INTERVAL_SECS, REPORT_WAIT_TIMEOUT_SECS,
@@ -367,3 +368,39 @@ class ASoC:
         client_type = CLIENT_TYPE_FORMAT.replace("<os>", os_name).replace("<plugin-version>", VERSION)
         self.logger.info(f"Client Type for scan: {client_type}")
         return client_type
+
+    def getScanIssues(self, scanId, top=1000):
+        """Fetch individual issues for a given scan from ASoC.
+        
+        Args:
+            scanId: The scan ID to fetch issues for.
+            top: Maximum number of issues to return (default 1000).
+        
+        Returns:
+            list: List of issue dictionaries, or empty list on error.
+        """
+        headers = {
+            "Accept": CONTENT_TYPE_JSON,
+            "Authorization": "Bearer " + self.token
+        }
+        url = f"{self.base_url}{API_SCAN_ISSUES.format(scan_id=scanId, top=top)}"
+        try:
+            if self.allow_untrusted:
+                resp = requests.get(url, headers=headers, verify=False)
+            else:
+                resp = requests.get(url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                # Handle both direct list and OData-style {Items: [...]} response
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    return data.get("Items", data.get("items", []))
+                return []
+            else:
+                self.logger.error(f"Error fetching scan issues: HTTP {resp.status_code}")
+                self.logger.debug(f"Response: {resp.text}")
+                return []
+        except Exception as e:
+            self.logger.error(f"Exception fetching scan issues: {e}")
+            return []
