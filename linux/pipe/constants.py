@@ -133,10 +133,15 @@ MSG_ASOC_APP_SUMMARY_ERROR = "ASoC App Summary Error Response"
 # =============================================================================
 # Code Insights Configuration
 # =============================================================================
-CODE_INSIGHTS_REPORT_ID = "asoc-sast-security-report"
+CODE_INSIGHTS_REPORT_ID = "asoc-security-report"
+CODE_INSIGHTS_SAST_REPORT_ID = "asoc-sast-security-report"
+CODE_INSIGHTS_SCA_REPORT_ID = "asoc-sca-security-report"
 CODE_INSIGHTS_REPORT_TITLE = "HCL ASoC Security Scan"
+CODE_INSIGHTS_SAST_REPORT_TITLE = "HCL ASoC SAST Security Scan"
+CODE_INSIGHTS_SCA_REPORT_TITLE = "HCL ASoC SCA Security Scan"
 CODE_INSIGHTS_REPORTER = "HCL AppScan on Cloud"
-CODE_INSIGHTS_LOGO_URL = "https://help.hcltechsw.com/favicon.ico"
+CODE_INSIGHTS_LOGO_FILE = "appscan.png"
+CODE_INSIGHTS_LOGO_URL = "https://cloud.appscan.com/favicon.ico"
 CODE_INSIGHTS_MAX_ANNOTATIONS = 1000
 CODE_INSIGHTS_ANNOTATION_TYPE = "VULNERABILITY"
 CODE_INSIGHTS_REPORT_TYPE = "SECURITY"

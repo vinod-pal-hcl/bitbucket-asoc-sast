@@ -26,11 +26,14 @@ The pipe has 20 variables.
 | WAIT_FOR_ANALYSIS | Optional | If true, waits for the scan to complete before finishing. Default: true |
 | FAIL_FOR_NONCOMPLIANCE | Optional | If true, fails the pipeline when issues are found at or above the severity threshold. Default: false |
 | FAILURE_THRESHOLD | Optional | Severity threshold for non-compliance check: "Critical", "High", "Medium", "Low" (default), or "Informational". |
-| CODE_INSIGHTS | Optional | If true, publishes scan results to Bitbucket Code Insights with a summary report and per-issue annotations on the commit. Requires `oidc: true` in the pipeline step. Default: false |
+| CODE_INSIGHTS | Optional | If true, publishes scan results to Bitbucket Code Insights with a summary report and per-issue annotations on the commit. When running via `docker run` on a self-hosted Windows runner, you must also provide `BITBUCKET_API_TOKEN` (see below). Default: false |
+| BITBUCKET_API_TOKEN | Optional | A Bitbucket API token with `pullrequests:write` scope. Required for Code Insights when running via `docker run` on a self-hosted Windows runner. |
 
 **Note:** Providing a config file can override other settings like `TARGET_DIR` or `SECRET_SCANNING`.
 
 **Security Note:** Only set `ALLOW_UNTRUSTED` to true in development/testing environments with self-signed certificates. In production, keep SSL verification enabled (default).
+
+**Windows Code Insights Note:** On Linux, the pipe authenticates to Bitbucket via the built-in auth proxy (works automatically). On Windows self-hosted runners using `docker run`, the auth proxy is not available. Instead, pass `BITBUCKET_API_TOKEN` as an environment variable. Create an API token at **Bitbucket → Personal settings → API tokens** with the `pullrequests:write` scope, then store it as a secured repository variable.
 
 ### Example bitbucket-pipelines.yml step
 
@@ -56,7 +59,8 @@ pipelines:
         after-script:
           - pipe: atlassian/checkstyle-report:0.2.0
     - step:
-        name: ASoC SAST Scan        oidc: true  # Required for CODE_INSIGHTS feature        script:
+        name: ASoC SAST Scan
+        script:
           # Custom Pipe to run Static Analysis via HCL AppScan on Cloud
           # View README: https://github.com/cwtravis/bitbucket-asoc-sast-linux
           - pipe: docker://cwtravis1/bitbucket_asoc_sast:windows
